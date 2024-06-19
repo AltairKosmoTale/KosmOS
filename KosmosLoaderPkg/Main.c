@@ -3,12 +3,14 @@
 #include <Library/UefiBootServicesTableLib.h>
 #include <Library/PrintLib.h>
 #include <Library/MemoryAllocationLib.h>
+#include <Library/BaseMemoryLib.h>
 #include <Protocol/LoadedImage.h>
 #include <Protocol/SimpleFileSystem.h>
 #include <Protocol/DiskIo2.h>
 #include <Protocol/BlockIo.h>
 #include <Guid/FileInfo.h>
-#include	"frame_buffer_config.hpp"
+#include "frame_buffer_config.hpp"
+#include "elf.hpp"
 
 // #@@range_begin(struct_memory_map)
 struct MemoryMap {
@@ -191,6 +193,36 @@ void Halt(void) {
 }
 // #@@range_end(halt)
 
+// #@@range_begin(calc_addr_func)
+void CalcLoadAddressRange(Elf64_Ehdr* ehdr, UINT64* first, UINT64* last) {
+	Elf64_Phdr* phdr = (Elf64_Phdr*)((UINT64)ehdr + ehdr->e_phoff);
+	*first = MAX_UINT64;
+	*last = 0;
+	for (Elf64_Half i = 0; i < ehdr->e_phnum; ++i) {
+		if (phdr[i].p_type != PT_LOAD) continue; // phdr[i] = ith 프로그램 헤더 -> LOAD 아니면 skip
+		*first = MIN(*first, phdr[i].p_vaddr); // 첫 LOAD segment의 p_vaddr
+		*last = MAX(*last, phdr[i].p_vaddr + phdr[i].p_memsz); // 마지막 LOAD의 segment p_vaddr + p_memsz
+	}
+}
+// #@@range_end(calc_addr_func)
+
+// #@@range_begin(copy_segm_func)
+void CopyLoadSegments(Elf64_Ehdr* ehdr) {
+	Elf64_Phdr* phdr = (Elf64_Phdr*)((UINT64)ehdr + ehdr->e_phoff);
+	for (Elf64_Half i = 0; i < ehdr->e_phnum; ++i) {
+		if (phdr[i].p_type != PT_LOAD) continue;
+
+		// 1. segm_in_file이 가리키는 임시 영역에서 p_vaddr이 가리키는 최종 목적지로 데이터 복사
+		UINT64 segm_in_file = (UINT64)ehdr + phdr[i].p_offset;
+		CopyMem((VOID*)phdr[i].p_vaddr, (VOID*)segm_in_file, phdr[i].p_filesz);
+		
+		// 2. segment의 메모리상 크기가 파일상의 크기보다 큰 경우, 남은 부분을 0으로 채움
+		UINTN remain_bytes = phdr[i].p_memsz - phdr[i].p_filesz;
+		SetMem((VOID*)(phdr[i].p_vaddr + phdr[i].p_filesz), remain_bytes, 0);
+	}
+}
+// #@@range_end(copy_segm_func)
+
 EFI_STATUS EFIAPI UefiMain(
 	EFI_HANDLE image_handle,
 	EFI_SYSTEM_TABLE *system_table) {
@@ -282,10 +314,35 @@ EFI_STATUS EFIAPI UefiMain(
 		Print(L"failed to get file information: %r\n", status);
 		Halt();
 	}
-	// #@@range_begin(alloc_error)	
+	
+	/* Loader 개량
+	1. 커널 파일을 한 번에 최종 목적지 X, 임시영역에 읽기
+	2. 임시 영역에 읽은 커널 파일의 헤더를 읽어 최종 목적지 주소 범위 계산
+	3. 계산된 최종 목적지로 LOAD 세그먼트 복사 & 임시 영역 제거 */
+	// #@@range_begin(read_kernel)
 	EFI_FILE_INFO* file_info = (EFI_FILE_INFO*)file_info_buffer;
 	UINTN kernel_file_size = file_info->FileSize;
-	EFI_PHYSICAL_ADDRESS kernel_base_addr = 0x100000;
+
+	VOID* kernel_buffer;
+	// 임시 영역 확보 -> page 단위가 아닌 byte 단위로 메모리 확보 & 저장 (위치 지정은 불가)
+	status = gBS->AllocatePool(EfiLoaderData, kernel_file_size, &kernel_buffer);
+	if (EFI_ERROR(status)) {
+		Print(L"failed to allocate pool: %r\n", status);
+		Halt();
+	}
+	// 임시 영역 시작 주소를 받아서 파일 내용 전부를 임시 영역에 읽기
+	status = kernel_file->Read(kernel_file, &kernel_file_size, kernel_buffer);
+	if (EFI_ERROR(status)) {
+		Print(L"error: %r", status);
+		Halt();
+	}
+	// #@@range_end(read_kernel)
+
+	// #@@range_begin(alloc_pages)
+	Elf64_Ehdr* kernel_ehdr = (Elf64_Ehdr*)kernel_buffer;
+	UINT64 kernel_first_addr, kernel_last_addr;
+	CalcLoadAddressRange(kernel_ehdr, &kernel_first_addr, &kernel_last_addr); // 범위 계산
+	
 	/* 이제 커널의 크기를 알았기 때문에, 메모리 확보
 	1. 메모리 확보 방법
 	1-1. 어디라도 좋으니, 비어있는 공간에서 확보: AllocateAnyPages
@@ -302,22 +359,26 @@ EFI_STATUS EFIAPI UefiMain(
 	
 	/* 페이지 수 = (kernel_file_size + 0xfff) / 0x1000 // 0x1000 = 4KiB
 	0xfff 더해주는 이유: 페이지수를 올림 하기 위해 -> 잘려서 누락되는 것 방지 (올림) */
-	status = gBS->AllocatePages(
-		AllocateAddress, EfiLoaderData,
-		(kernel_file_size + 0xfff) / 0x1000, &kernel_base_addr);
+
+	UINTN num_pages = (kernel_last_addr - kernel_first_addr + 0xfff) / 0x1000;
+	status = gBS->AllocatePages(AllocateAddress, EfiLoaderData, num_pages, &kernel_first_addr);
 	if (EFI_ERROR(status)) {
-		Print(L"failed to allocate pages: %r", status);
+		Print(L"failed to allocate pages: %r\n", status);
 		Halt();
 	}
-	// #@@range_end(alloc_error)
+	// #@@range_end(alloc_pages)
+
+	// #@@range_begin(copy_segments)
+	CopyLoadSegments(kernel_ehdr); // 임시 영역에서 최종 목적지로 LOAD segment 복사
+	Print(L"Kernel: 0x%0lx - 0x%0lx\n", kernel_first_addr, kernel_last_addr);
 	
-	status = kernel_file->Read(kernel_file, &kernel_file_size, (VOID*)kernel_base_addr);
+	status = gBS->FreePool(kernel_buffer); // 확보했던 임시 영역 해제
 	if (EFI_ERROR(status)) {
-		Print(L"error: %r", status);
+		Print(L"failed to free pool: %r\n", status);
 		Halt();
 	}
-	Print(L"Kernel: 0x%0lx (%lu bytes)\n", kernel_base_addr, kernel_file_size);
-	// #@@range_end(read_kernel)
+	// #@@range_end(copy_segments)
+
 	
 	// #@@range_begin(exit_bs)
 	/* ExitBootServices()는 최신 메모리 맵의 맵 키 요구
@@ -345,7 +406,9 @@ EFI_STATUS EFIAPI UefiMain(
 	// #@@range_begin(call_kernel)
 	// ELF Spec상, Entry Point offset 24byte에서 8byte 정수로 작성
 	// 함수 포인터로 캐스트 하고 호출 (유사 PC)
-	UINT64 entry_addr = *(UINT64*)(kernel_base_addr + 24);
+	// #@@range_begin(get_entry_point)
+	UINT64 entry_addr = *(UINT64*)(kernel_first_addr + 24);
+	// #@@range_end(get_entry_point)
 
 	//typedef void EntryPointType(UINT64, UINT64);
 	// #@@range_begin(pass_frame_buffer_config)

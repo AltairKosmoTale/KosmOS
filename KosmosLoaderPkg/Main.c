@@ -2,6 +2,7 @@
 #include <Library/UefiLib.h>
 #include <Library/UefiBootServicesTableLib.h>
 #include <Library/PrintLib.h>
+#include	<Library/MemoryAllocationLib.h>
 #include <Protocol/LoadedImage.h>
 #include <Protocol/SimpleFileSystem.h>
 #include <Protocol/DiskIo2.h>
@@ -119,12 +120,55 @@ EFI_STATUS OpenRootDir(EFI_HANDLE image_handle, EFI_FILE_PROTOCOL** root) {
 }
 // #@@range_end(open_root_dir)
 
+// #@@range_begin(open_gop)
+EFI_STATUS OpenGOP(EFI_HANDLE image_handle, EFI_GRAPHICS_OUTPUT_PROTOCOL** gop) {
+	UINTN num_gop_handles = 0;
+	EFI_HANDLE* gop_handles = NULL;
+	gBS->LocateHandleBuffer(
+		ByProtocol,
+		&gEfiGraphicsOutputProtocolGuid,
+		NULL,
+		&num_gop_handles,
+		&gop_handles);
+
+	gBS->OpenProtocol(
+		gop_handles[0],
+		&gEfiGraphicsOutputProtocolGuid,
+		(VOID**)gop,
+		image_handle,
+		NULL,
+		EFI_OPEN_PROTOCOL_BY_HANDLE_PROTOCOL);
+
+	FreePool(gop_handles);
+
+	return EFI_SUCCESS;
+}
+// #@@range_end(open_gop)
+
+// #@@range_begin(get_pixel_format_unicode)
+const CHAR16* GetPixelFormatUnicode(EFI_GRAPHICS_PIXEL_FORMAT fmt) {
+	switch (fmt) {
+		case PixelRedGreenBlueReserved8BitPerColor:
+			return L"PixelRedGreenBlueReserved8BitPerColor";
+		case PixelBlueGreenRedReserved8BitPerColor:
+			return L"PixelBlueGreenRedReserved8BitPerColor";
+		case PixelBitMask:
+			return L"PixelBitMask";
+		case PixelBltOnly:
+			return L"PixelBltOnly";
+		case PixelFormatMax:
+			return L"PixelFormatMax";
+		default:
+			return L"InvalidPixelFormat";
+	}
+}
+// #@@range_end(get_pixel_format_unicode)
+
 EFI_STATUS EFIAPI UefiMain(
 	EFI_HANDLE image_handle,
 	EFI_SYSTEM_TABLE *system_table) {
 	Print(L"Hello, KosmOS!\n");
 	
-	// #@@range_begin(main)
 	CHAR8 memmap_buf[4096 * 4];
 	struct MemoryMap memmap = {sizeof(memmap_buf), memmap_buf, 0, 0, 0, 0};
 	GetMemoryMap(&memmap);
@@ -139,7 +183,25 @@ EFI_STATUS EFIAPI UefiMain(
 
 	SaveMemoryMap(&memmap, memmap_file);
 	memmap_file->Close(memmap_file);
-	// #@@range_end(main)
+	
+	// #@@range_begin(gop)
+	EFI_GRAPHICS_OUTPUT_PROTOCOL* gop;
+	OpenGOP(image_handle, &gop);
+	Print(L"Resolution: %ux%u, Pixel Format: %s, %u pixels/line\n",
+		gop->Mode->Info->HorizontalResolution,
+		gop->Mode->Info->VerticalResolution,
+		GetPixelFormatUnicode(gop->Mode->Info->PixelFormat),
+		gop->Mode->Info->PixelsPerScanLine); // 1픽셀의 데이터 형식 (256 or 16,770,000)
+	Print(L"Frame Buffer: 0x%0lx - 0x%0lx, Size: %lu bytes\n",
+		gop->Mode->FrameBufferBase, // 디스플레이 픽셀에 반영 되는 시작 주소
+		gop->Mode->FrameBufferBase + gop->Mode->FrameBufferSize, // 시작 주속 + 크기
+		gop->Mode->FrameBufferSize); // 크기
+
+	UINT8* frame_buffer = (UINT8*)gop->Mode->FrameBufferBase;
+	for (UINTN i = 0; i < gop->Mode->FrameBufferSize; ++i) {
+		frame_buffer[i] = 255;
+	}
+	// #@@range_end(gop)
 
 	// #@@range_begin(read_kernel)
 	EFI_FILE_PROTOCOL* kernel_file;
@@ -185,7 +247,7 @@ EFI_STATUS EFIAPI UefiMain(
 	kernel_file->Read(kernel_file, &kernel_file_size, (VOID*)kernel_base_addr);
 	Print(L"Kernel: 0x%0lx (%lu bytes)\n", kernel_base_addr, kernel_file_size);
 	// #@@range_end(read_kernel)
-
+	
 	// #@@range_begin(exit_bs)
 	EFI_STATUS status;
 	/* ExitBootServices()는 최신 메모리 맵의 맵 키 요구

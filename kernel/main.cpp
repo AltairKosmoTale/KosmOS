@@ -1,60 +1,15 @@
 #include <cstdint>
 #include <cstddef>
+#include <cstdio>
+// #@@range_begin(includes)
 #include "frame_buffer_config.hpp"
+#include "graphics.hpp" // image 관련 코드
+#include "font.hpp" // font 관련 코드
+#include "console.hpp"
+// #@@range_end(includes)
 
 /* 픽셀 데이터 형식에 의존 하지 않는 "픽셀 렌더링 인터페이스",
 "픽셀 데이터 형식에 따라 실제 렌더링의 구현" 분리 */
-
-// #@@range_begin(write_pixel)
-struct PixelColor {
-	uint8_t r, g, b;
-};
-
-// #@@range_begin(pixel_writer)
-class PixelWriter {
- public:
-	PixelWriter(const FrameBufferConfig& config) : config_{config} { // 생성자
-	} // 프레임 버퍼의 구성 정보를 받아 클래스 멤버 변수 config_에 복사
-	// FrameBufferConfig의 내용을 그대로 복사 X, 포인터를 복사하는 것
-	// 즉, Write 할때, 구성 정보 전달 필요 X
-	virtual ~PixelWriter() = default; // 소멸자
-	virtual void Write(int x, int y, const PixelColor& c) = 0; // 순수 가상 함수 "= 0"
-
- protected:
-	uint8_t* PixelAt(int x, int y) {
-		return config_.frame_buffer + 4 * (config_.pixels_per_scan_line * y + x);
-	}
-
- private:
-	const FrameBufferConfig& config_;
-};
-// #@@range_end(pixel_writer)
-
-// #@@range_begin(derived_pixel_writer)
-class RGBResv8BitPerColorPixelWriter : public PixelWriter {
- public:
-	using PixelWriter::PixelWriter; // 부모 생성자 사용
-	// Override
-	virtual void Write(int x, int y, const PixelColor& c) override {
-		auto p = PixelAt(x, y);
-		p[0] = c.r;
-		p[1] = c.g;
-		p[2] = c.b;
-	}
-};
-
-class BGRResv8BitPerColorPixelWriter : public PixelWriter {
- public:
-	using PixelWriter::PixelWriter; // 부모 생성자 사용
-	// Override
-	virtual void Write(int x, int y, const PixelColor& c) override {
-		auto p = PixelAt(x, y);
-		p[0] = c.b;
-		p[1] = c.g;
-		p[2] = c.r;
-	}
-};
-// #@@range_end(derived_pixel_writer)
 
 // #@@range_begin(placement_new)
 // 파라미터를 취하는 new: "displacement new"
@@ -79,6 +34,26 @@ void operator delete(void* obj) noexcept {
 char pixel_writer_buf[sizeof(RGBResv8BitPerColorPixelWriter)];
 PixelWriter* pixel_writer;
 
+// #@@range_begin(console_buf)
+char console_buf[sizeof(Console)];
+Console* console;
+// #@@range_end(console_buf)
+
+// #@@range_begin(printk)
+int printk(const char* format, ...) {
+	va_list ap;
+	int result;
+	char s[1024];
+
+	va_start(ap, format);
+	result = vsprintf(s, format, ap);
+	va_end(ap);
+
+	console->PutString(s);
+	return result;
+}
+// #@@range_end(printk)
+
 // #@@range_begin(call_pixel_writer)
 extern "C" void KernelMain(const FrameBufferConfig& frame_buffer_config) {
 	switch (frame_buffer_config.pixel_format) {
@@ -91,6 +66,9 @@ extern "C" void KernelMain(const FrameBufferConfig& frame_buffer_config) {
 			BGRResv8BitPerColorPixelWriter{frame_buffer_config};
 			break;
 	}
+	/* Test1. Image Rendering, Font Rendering, Use Sprintf
+	// #@@range_begin(Test1) : 출력 결과: draw gray square, write all font, print string with sprinft
+	
 	for (int x = 0; x < frame_buffer_config.horizontal_resolution; ++x) {
 		for (int y = 0; y < frame_buffer_config.vertical_resolution; ++y) {
 			pixel_writer->Write(x, y, {255, 255, 255});
@@ -101,6 +79,37 @@ extern "C" void KernelMain(const FrameBufferConfig& frame_buffer_config) {
 			pixel_writer->Write(x, y, {100, 100, 100});
 		}
 	}
+
+	// #@@range_begin(write_fonts)
+	int i = 0;
+	for (char c = '!'; c <= '~'; ++c, ++i) {
+		WriteAscii(*pixel_writer, 8 * i, 50, c, {0, 0, 0}); // 글자 간격 8이니까, 8띄어서 출력 시도
+	}
+	WriteString(*pixel_writer, 0, 66, "Hello, KosmOS!", {0, 0, 0}); // 글자 높이는 16 간격 (50+16=66)
+	// #@@range_end(write_fonts)	
+
+	// #@@range_begin(sprintf)
+	char buf[128];
+	sprintf(buf, "1 + 1 = %d", 1 + 1);
+	WriteString(*pixel_writer, 0, 82, buf, {0, 0, 0}); // 글자 높이는 16 간격 (66+16=82)
+	// #@@range_end(sprintf) 
+	*/ // #@@range_end(Test1) 
+	
+	// /* Test2. Scroll, printk function
+	// #@@range_begin(Test2) : 출력 결과: write 24 lines -> scroll 3 lines -> 3~26 left
+	
+	// #@@range_begin(new_console)
+	// displacement new 사용 -> 인스턴스 생성
+	console = new(console_buf) Console{*pixel_writer, {0, 0, 0}, {255, 255, 255}};
+	// #@@range_end(new_console)
+	
+	// #@@range_begin(use_printk)
+	for (int i = 0; i < 27; ++i) { // (kRows < 25) : 24 줄 작성 가능, line 0~2 scroll -> 3~26 left
+		printk("printk: %d\n", i);
+	}
+	// #@@range_end(use_printk)
+	// */ // #@@range_end(Test2)
+	
 	while (1) __asm__("hlt");
 }
 // #@@range_end(call_pixel_writer)

@@ -10,6 +10,9 @@
 #include "font.hpp" // font 관련 코드
 #include "console.hpp"
 #include "pci.hpp"
+#include "interrupt.hpp"
+#include "asmfunc.h"
+#include "queue.hpp"
 
 #include "logger.hpp"
 #include "usb/memory.hpp"
@@ -18,30 +21,6 @@
 #include "usb/xhci/xhci.hpp"
 #include "usb/xhci/trb.hpp"
 // #@@range_end(includes)
-
-/* 픽셀 데이터 형식에 의존 하지 않는 "픽셀 렌더링 인터페이스",
-"픽셀 데이터 형식에 따라 실제 렌더링의 구현" 분리 */
-
-
-// #@@range_begin(placement_new)
-		// 파라미터를 취하는 new: "displacement new"
-		/* 일반적인 new: 파라미터 X, 힙영역에 생성
-		new, malloc() 차이: 클래스 생성자의 호출 여부
-		malloc(): 초기화 되지 않은 데이터가 들어간 상태로 메모리 영역 반환
-		new: 메모리 역역 확보 후 생성자 호출: 컴파일러 -> 생성자 호출을 위한 명령어를 삽입
-		- 프로그래머가 명시적으로 생성자 호출 X: new 연산자 사용
-		- 힙 영역에 확보 -> OS에서 메모리 지원 필요
-		메모리 X -> displacement new: 메모리 영역 확보 X, 파라미터로 지정한 영역상에 인스턴스 생성
-		: 메모리 관리 필요 없는 "배열" 사용시 원하는 크기 메모리 영역 확보 가능 */
-
-		// operator overloading -> 새로운 new 생성시, 새로운 delete pair 필요
-		/* 
-		void* operator new(size_t size, void* buf) {
-			return buf;
-		}
-		void operator delete(void* obj) noexcept {
-		}
-// #@@range_end(placement_new) */
 
 const PixelColor kDesktopBGColor{42, 42, 42};
 const PixelColor kDesktopFGColor{0, 240, 0};
@@ -101,6 +80,35 @@ void SwitchEhci2Xhci(const pci::Device& xhc_dev) {
 }
 // #@@range_end(switch_echi2xhci)
 
+// #@@range_begin(xhci_handler)
+usb::xhci::Controller* xhc;
+
+// #@@range_begin(queue_message)
+struct Message {
+	enum Type {
+		kInterruptXHCI,
+	} type;
+};
+
+ArrayQueue<Message>* main_queue;
+// #@@range_end(queue_message)
+
+// #@@range_begin(xhci_handler)
+__attribute__((interrupt)) // 컴파일러가 interrupt handler에 필요한 전 후 처리 삽입
+void IntHandlerXHCI(InterruptFrame* frame) {
+	/*while (xhc->PrimaryEventRing()->HasFront()) {
+		if (auto err = ProcessEvent(*xhc)) {
+			Log(kError, "Error while ProcessEvent: %s at %s:%d\n",
+					err.Name(), err.File(), err.Line());
+		}
+	} ProcessEvent 1회 처리시 -> USB로부터 수신한 데이터 해석, MouseObserver 호출, 렌더링 
+	interrupt handler 처리 시간이 길어지면, interrupt 처리 동안 다른 interrupt 못받을 확률이 높아짐
+	동적 메모리 사용하지 않는 Queue(FIFO)를 구현해 해결 */
+	main_queue->Push(Message{Message::kInterruptXHCI});	
+	NotifyEndOfInterrupt();
+}
+// #@@range_end(xhci_handler)
+
 // #@@range_begin(call_pixel_writer)
 extern "C" void KernelMain(const FrameBufferConfig& frame_buffer_config) {
 	switch (frame_buffer_config.pixel_format) {
@@ -130,6 +138,7 @@ extern "C" void KernelMain(const FrameBufferConfig& frame_buffer_config) {
 	console = new(console_buf) Console{
 		*pixel_writer, kDesktopFGColor, kDesktopBGColor
 	};
+	// here KosmOS Ascii
 	printk("Welcome to KosmOS!\n");
 	printk(" /$$   /$$                                    /$$$$$$   /$$$$$$ \n");
 	printk("| $$  /$$/                                   /$$__  $$ /$$__  $$\n");
@@ -149,6 +158,10 @@ extern "C" void KernelMain(const FrameBufferConfig& frame_buffer_config) {
 	};
 	// #@@range_end(new_mouse_cursor)
 
+	std::array<Message, 32> main_queue_data;
+	ArrayQueue<Message> main_queue{main_queue_data};
+	::main_queue = &main_queue;
+  
 	auto err = pci::ScanAllBus();
 	Log(kDebug, "ScanAllBus: %s\n", err.Name());
 
@@ -182,6 +195,24 @@ extern "C" void KernelMain(const FrameBufferConfig& frame_buffer_config) {
 	}
 	// #@@range_end(find_xhc)
 
+	// #@@range_begin(load_idt)
+	const uint16_t cs = GetCS(); // 현재 code segment 값 get
+	// InterruptVector::kXHCI : 0x40 정의
+	SetIDTEntry(idt[InterruptVector::kXHCI], MakeIDTAttr(DescriptorType::kInterruptGate, 0),
+							reinterpret_cast<uint64_t>(IntHandlerXHCI), cs); // 현재 code segment 값 지정
+	LoadIDT(sizeof(idt) - 1, reinterpret_cast<uintptr_t>(&idt[0]));
+	// #@@range_end(load_idt)
+
+	// #@@range_begin(configure_msi)
+	// BSP (Bootstrap Processor) : 최초로 동작하는 Core
+	const uint8_t bsp_local_apic_id = *reinterpret_cast<const uint32_t*>(0xfee00020) >> 24;
+	pci::ConfigureMSIFixedDestination(
+			*xhc_dev, bsp_local_apic_id, // bsp_local_apic_id = Destinamtion ID (해당 core에 대해)
+			pci::MSITriggerMode::kLevel,
+			pci::MSIDeliveryMode::kFixed,
+			InterruptVector::kXHCI, 0); // 지정한 interrupt 발생시키라는 설정
+	// #@@range_end(configure_msi)
+	
 	// #@@range_begin(read_bar)
 	/* xHCI Spec상, xHC를 제어하는 레지스터: MMIO -> memory address space 어딘가에 register 존재
 	MMIO address: PCI configuration Space의 BAR0에 기재 ->
@@ -212,6 +243,9 @@ extern "C" void KernelMain(const FrameBufferConfig& frame_buffer_config) {
 	xhc.Run(); // xHC 동작 (PC에 연결된 USB의 기기 인식 순차적으로 진행)
 	// #@@range_end(init_xhc)
 
+	::xhc = &xhc;
+	__asm__("sti");
+	
 	// #@@range_begin(configure_port)
 	usb::HIDMouseDriver::default_observer = MouseObserver;
 
@@ -228,18 +262,35 @@ extern "C" void KernelMain(const FrameBufferConfig& frame_buffer_config) {
 		}
 	}
 	// #@@range_end(configure_port)
+	
+	// #@@range_begin(event_loop)
+	while (true) {
+		// #@@range_begin(get_front_message)
+		__asm__("cli"); // CPU interrupt flag to 0 // 외부 interrupt 차단 (race condition 차단 효과 / 완벽 X)
+		if (main_queue.Count() == 0) {
+			__asm__("sti\n\thlt");
+			continue;
+		}
 
-	// #@@range_begin(receive_event)
-	while (1) {
-		// data -> event 형태로 xHC에 Stack -> ProcessEvent로 처리 (polling 기법)
-		if (auto err = ProcessEvent(xhc)) { 
-			Log(kError, "Error while ProcessEvent: %s at %s:%d\n",
-					err.Name(), err.File(), err.Line());
+		Message msg = main_queue.Front();
+		main_queue.Pop();
+		__asm__("sti"); // CPU interrupt flag to 1 // 외부 interrupt 승인
+		// #@@range_end(get_front_message)
+
+		switch (msg.type) {
+		case Message::kInterruptXHCI:
+			while (xhc.PrimaryEventRing()->HasFront()) {
+				if (auto err = ProcessEvent(xhc)) {
+					Log(kError, "Error while ProcessEvent: %s at %s:%d\n",
+							err.Name(), err.File(), err.Line());
+				}
+			}
+			break;
+		default:
+			Log(kError, "Unknown message type: %d\n", msg.type);
 		}
 	}
-	// #@@range_end(receive_event)
-
-	while (1) __asm__("hlt");
+	// #@@range_end(event_loop)
 }
 
 extern "C" void __cxa_pure_virtual() {

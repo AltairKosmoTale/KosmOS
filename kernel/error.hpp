@@ -26,6 +26,7 @@ class Error {
 		kInvalidPhase,
 		kUnknownXHCISpeedID,
 		kNoWaiter,
+		kNoPCIMSI,
 		kLastOfCode,	// 항상 마지막에 배치
 	};
 
@@ -51,6 +52,7 @@ class Error {
 		"kInvalidPhase",
 		"kUnknownXHCISpeedID",
 		"kNoWaiter",
+		"kNoPCIMSI",
 	};
 	static_assert(Error::Code::kLastOfCode == code_names_.size());
 

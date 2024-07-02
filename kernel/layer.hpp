@@ -21,7 +21,7 @@ class Layer {
 	// 레이어의 위치정보를 지정된 "상대 좌표"로 갱신, 다시 그리지는 않음
 	Layer& MoveRelative(Vector2D<int> pos_diff);
 	// wirter에 현재 설정된 윈도우의 내용을 렌더링
-	void DrawTo(PixelWriter& writer) const;
+	void DrawTo(FrameBuffer& screen) const;
 
  private:
 	unsigned int id_;
@@ -34,7 +34,7 @@ class Layer {
 class LayerManager {
  public:
 	// Draw 메소드 등으로 렌더링할 때의 렌더링 목적지를 설정
-	void SetWriter(PixelWriter* writer);
+	void SetWriter(FrameBuffer* screen);
 	// 새로운 레이어를 생성 및 참조 반환
 	// 새롭게 생성된 레이어의 실체는 LayerManager 내부의 컨테이너에서 유지
 	Layer& NewLayer();
@@ -50,16 +50,18 @@ class LayerManager {
 	void UpDown(unsigned int id, int new_height);
 	// 레이어를 숨김
 	void Hide(unsigned int id);
-
+	
  private:
-	PixelWriter* writer_{nullptr};
+	// #@@range_begin(layermgr_fields)
+	FrameBuffer* screen_{nullptr};
 	// layers_: 동적 배열 (표시 O, 표시 X 레이어 포함 존재하는 모든 레이어 저장)
 	// shared_ptr: 스마트 포인터의 일종 // 공유 가능
 	// unique_ptr: 스마트 포인터의 일종 // 공유 불가 -> 소유 명시 (LayerManager)
 	std::vector<std::unique_ptr<Layer>> layers_{}; 
 	std::vector<Layer*> layer_stack_{};
 	unsigned int latest_id_{0};
-
+	// #@@range_end(layermgr_fields)
+	
 	Layer* FindLayer(unsigned int id);
 };
 

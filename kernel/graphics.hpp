@@ -1,5 +1,5 @@
 #pragma once
-
+#include <algorithm>
 // #@@range_begin(pixel_color_def)
 #include "frame_buffer_config.hpp"
 
@@ -16,11 +16,45 @@ inline bool operator!=(const PixelColor& lhs, const PixelColor& rhs) {
 	return !(lhs == rhs);
 }
 
+template <typename T>
+struct Vector2D {
+	T x, y;
+
+	template <typename U>
+	Vector2D<T>& operator +=(const Vector2D<U>& rhs) {
+		x += rhs.x;
+		y += rhs.y;
+		return *this;
+	}
+};
+
+template <typename T, typename U>
+auto operator +(const Vector2D<T>& lhs, const Vector2D<U>& rhs)
+	-> Vector2D<decltype(lhs.x + rhs.x)> {
+		return {lhs.x + rhs.x, lhs.y + rhs.y
+	};
+}
+
+template <typename T>
+Vector2D<T> ElementMax(const Vector2D<T>& lhs, const Vector2D<T>& rhs) {
+	return {std::max(lhs.x, rhs.x), std::max(lhs.y, rhs.y)};
+}
+
+template <typename T>
+Vector2D<T> ElementMin(const Vector2D<T>& lhs, const Vector2D<T>& rhs) {
+	return {std::min(lhs.x, rhs.x), std::min(lhs.y, rhs.y)};
+}
+
+template <typename T>
+struct Rectangle {
+	Vector2D<T> pos, size;
+};
+
 // #@@range_begin(pixel_writer)
 class PixelWriter {
  public:
 	virtual ~PixelWriter() = default; // 소멸자
-	virtual void Write(int x, int y, const PixelColor& c) = 0; // 순수 가상 함수 "= 0"
+	virtual void Write(Vector2D<int> pos, const PixelColor& c) = 0; // 순수 가상 함수 "= 0"
 	virtual int Width() const = 0;
 	virtual int Height() const = 0;
 };
@@ -34,8 +68,8 @@ class FrameBufferWriter : public PixelWriter {
 	virtual int Height() const override { return config_.vertical_resolution; }
   
  protected:
-	uint8_t* PixelAt(int x, int y) {
-		return config_.frame_buffer + 4 * (config_.pixels_per_scan_line * y + x);
+	uint8_t* PixelAt(Vector2D<int> pos) {
+		return config_.frame_buffer + 4 * (config_.pixels_per_scan_line * pos.y + pos.x);
 	}
 
  private:
@@ -47,28 +81,15 @@ class FrameBufferWriter : public PixelWriter {
 class RGBResv8BitPerColorPixelWriter : public FrameBufferWriter {
  public:
 	using FrameBufferWriter::FrameBufferWriter;
-	virtual void Write(int x, int y, const PixelColor& c) override; // override
+	virtual void Write(Vector2D<int> pos, const PixelColor& c) override; // override
 };
 
 class BGRResv8BitPerColorPixelWriter : public FrameBufferWriter {
  public:
 	using FrameBufferWriter::FrameBufferWriter;
-	virtual void Write(int x, int y, const PixelColor& c) override; // override
+	virtual void Write(Vector2D<int> pos, const PixelColor& c) override; // override
 };
 // #@@range_end(pixel_writer_def)
-
-// #@@range_begin(vector2d)
-template <typename T>
-struct Vector2D {
-	T x, y;
-	template <typename U>
-	Vector2D<T>& operator +=(const Vector2D<U>& rhs) {
-		x += rhs.x;
-		y += rhs.y;
-		return *this;
-	}
-};
-// #@@range_end(vector2d)
 
 void DrawRectangle(PixelWriter& writer, const Vector2D<int>& pos, const Vector2D<int>& size, const PixelColor& c);
 void FillRectangle(PixelWriter& writer, const Vector2D<int>& pos, const Vector2D<int>& size, const PixelColor& c);

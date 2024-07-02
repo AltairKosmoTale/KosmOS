@@ -36,17 +36,17 @@ Layer& Layer::MoveRelative(Vector2D<int> pos_diff) {
 // #@@range_end(layer_move)
 
 // #@@range_begin(layer_drawto)
-void Layer::DrawTo(PixelWriter& writer) const {
+void Layer::DrawTo(FrameBuffer& screen) const {
 	if (window_) {
-		window_->DrawTo(writer, pos_); // 레이어가 위치를 관리
+		window_->DrawTo(screen, pos_); // 레이어가 위치를 관리
 	}
 }
 // #@@range_end(layer_drawto)
 
 
 // #@@range_begin(layermgr_setwriter)
-void LayerManager::SetWriter(PixelWriter* writer) {
-	writer_ = writer;
+void LayerManager::SetWriter(FrameBuffer* screen) {
+	screen_ = screen;
 }
 // #@@range_end(layermgr_setwriter)
 
@@ -65,7 +65,7 @@ Layer& LayerManager::NewLayer() {
 void LayerManager::Draw() const {
 	// layer_stack_ 배열은 선두가 가장 아래쪽, 배열 끝이 가장 위쪽
 	for (auto layer : layer_stack_) {
-		layer->DrawTo(*writer_);
+		layer->DrawTo(*screen_);
 	}
 }
 // #@@range_end(layermgr_draw)

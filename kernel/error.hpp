@@ -27,6 +27,7 @@ class Error {
 		kUnknownXHCISpeedID,
 		kNoWaiter,
 		kNoPCIMSI,
+		kUnknownPixelFormat,
 		kLastOfCode,	// 항상 마지막에 배치
 	};
 
@@ -53,6 +54,7 @@ class Error {
 		"kUnknownXHCISpeedID",
 		"kNoWaiter",
 		"kNoPCIMSI",
+		"kUnknownPixelFormat",
 	};
 	static_assert(Error::Code::kLastOfCode == code_names_.size());
 

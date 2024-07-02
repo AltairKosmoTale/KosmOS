@@ -6,9 +6,9 @@
 // #@@range_begin(includes)
 #include "frame_buffer_config.hpp"
 #include "memory_map.hpp"
-#include "graphics.hpp" // image 관련 코드
+#include "graphics.hpp"
 #include "mouse.hpp"
-#include "font.hpp" // font 관련 코드
+#include "font.hpp"
 #include "console.hpp"
 #include "pci.hpp"
 #include "interrupt.hpp"
@@ -19,6 +19,7 @@
 #include "memory_manager.hpp"
 #include "window.hpp"
 #include "layer.hpp"
+#include "timer.hpp"
 
 #include "logger.hpp"
 #include "usb/memory.hpp"
@@ -36,7 +37,7 @@ char console_buf[sizeof(Console)];
 Console* console;
 // #@@range_end(console_buf)
 
-// #@@range_begin(printk)
+// #@@range_begin(measure_printk)
 int printk(const char* format, ...) {
 	va_list ap;
 	int result;
@@ -46,10 +47,17 @@ int printk(const char* format, ...) {
 	result = vsprintf(s, format, ap);
 	va_end(ap);
 
+	StartLAPICTimer();
+	console->PutString(s);
+	auto elapsed = LAPICTimerElapsed();
+	StopLAPICTimer();
+
+	sprintf(s, "[%9d]", elapsed);
+  
 	console->PutString(s);
 	return result;
 }
-// #@@range_end(printk)
+// #@@range_end(measure_printk)
 
 // #@@range_begin(memman_buf)
 char memory_manager_buf[sizeof(BitmapMemoryManager)];
@@ -61,7 +69,11 @@ unsigned int mouse_layer_id;
 
 void MouseObserver(int8_t displacement_x, int8_t displacement_y) {
 	layer_manager->MoveRelative(mouse_layer_id, {displacement_x, displacement_y});
+	StartLAPICTimer();
 	layer_manager->Draw();
+	auto elapsed = LAPICTimerElapsed();
+	StopLAPICTimer();
+	printk("MouseObserver: elapsed = %u\n", elapsed);	
 }
 // #@@range_end(layermgr_mousehandler)
 
@@ -156,6 +168,7 @@ extern "C" void KernelMainNewStack(
 	printk("| $$ :  $$|  $$$$$$/ /$$$$$$$/| $$ | $$ | $$|  $$$$$$/|  $$$$$$/\n");
 	printk("|__/  :__/ :______/ |_______/ |__/ |__/ |__/ :______/  :______/ \n");
 	SetLogLevel(kWarn);
+	InitializeLAPICTimer();
 	// #@@range_end(draw_desktop)
 	
 	// #@@range_begin(setup_segments_and_page)
@@ -321,20 +334,29 @@ extern "C" void KernelMainNewStack(
 	const int kFrameHeight = frame_buffer_config.vertical_resolution;
 
 	// BackGroundWindow, BackGroundWriter
-	auto bgwindow = std::make_shared<Window>(kFrameWidth, kFrameHeight);
+	auto bgwindow = std::make_shared<Window>(
+		kFrameWidth, kFrameHeight, frame_buffer_config.pixel_format);
 	auto bgwriter = bgwindow->Writer();
 
+	// #@@range_begin(set_window)
 	DrawDesktop(*bgwriter);
-	console->SetWriter(bgwriter);
+	console->SetWindow(bgwindow);
+	// #@@range_end(set_window)
 
 	auto mouse_window = std::make_shared<Window>(
-			kMouseCursorWidth, kMouseCursorHeight);
+			kMouseCursorWidth, kMouseCursorHeight, frame_buffer_config.pixel_format);
 	mouse_window->SetTransparentColor(kMouseTransparentColor);
 	DrawMouseCursor(mouse_window->Writer(), {0, 0});
 
+	// #@@range_begin(create_screen)
+	FrameBuffer screen;
+	if (auto err = screen.Initialize(frame_buffer_config)) {
+		Log(kError, "failed to initialize frame buffer: %s at %s:%d\n",
+				err.Name(), err.File(), err.Line());
+	}	
 	layer_manager = new LayerManager;
-	layer_manager->SetWriter(pixel_writer);
-
+	layer_manager->SetWriter(&screen);
+	// #@@range_end(create_screen)
 	auto bglayer_id = layer_manager->NewLayer()
 		.SetWindow(bgwindow)
 		.Move({0, 0})

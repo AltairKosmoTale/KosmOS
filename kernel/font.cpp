@@ -17,7 +17,7 @@ const uint8_t* GetFont(char c) {
 // #@@range_end(font_text_bin)
 
 // #@@range_begin(write_ascii)
-void WriteAscii(PixelWriter& writer, int x, int y, char c, const PixelColor& color) {
+void WriteAscii(PixelWriter& writer, Vector2D<int> pos, char c, const PixelColor& color) {	
 	const uint8_t* font = GetFont(c);
 	if (font == nullptr) {
 		return;
@@ -27,7 +27,7 @@ void WriteAscii(PixelWriter& writer, int x, int y, char c, const PixelColor& col
 			if ((font[dy] << dx) & 0x80u) {
 			// dy[]를 dx에 맞게 Left Shift하여 맨 왼쪽값이 1이면 출력
 			// 0x80u = 0b10000000
-				writer.Write(x + dx, y + dy, color);
+				writer.Write(pos + Vector2D<int>{dx, dy}, color);
 			}
 		}
 	}
@@ -35,9 +35,9 @@ void WriteAscii(PixelWriter& writer, int x, int y, char c, const PixelColor& col
 // #@@range_end(write_ascii)
 
 // #@@range_begin(write_string)
-void WriteString(PixelWriter& writer, int x, int y, const char* s, const PixelColor& color) {
+void WriteString(PixelWriter& writer, Vector2D<int> pos, const char* s, const PixelColor& color) {
 	for (int i = 0; s[i] != '\0'; ++i) {
-		WriteAscii(writer, x + 8 * i, y, s[i], color);
+		WriteAscii(writer, pos + Vector2D<int>{8 * i, 0}, s[i], color);
 	}
 }
 // #@@range_end(write_string)

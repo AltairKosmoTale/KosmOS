@@ -6,7 +6,7 @@
 
 // #@@range_begin(constructor)
 Console::Console(const PixelColor& fg_color, const PixelColor& bg_color)
-	: writer_{nullptr}, fg_color_{fg_color}, bg_color_{bg_color},
+	: writer_{nullptr}, window_{}, fg_color_{fg_color}, bg_color_{bg_color},
 		buffer_{}, cursor_row_{0}, cursor_column_{0} { // buffer Null로 초기화
 }
 // #@@range_end(constructor)
@@ -17,7 +17,7 @@ void Console::PutString(const char* s) {
 		if (*s == '\n') { // \n 만나면 Newline
 			Newline();
 		} else if (cursor_column_ < kColumns - 1) {
-			WriteAscii(*writer_, 8 * cursor_column_, 16 * cursor_row_, *s, fg_color_);
+			WriteAscii(*writer_, Vector2D<int>{8 * cursor_column_, 16 * cursor_row_}, *s, fg_color_);			
 			buffer_[cursor_row_][cursor_column_] = *s;
 			++cursor_column_;
 		}
@@ -35,24 +35,42 @@ void Console::SetWriter(PixelWriter* writer) {
 		return;
 	}
 	writer_ = writer;
+	window_.reset();
 	Refresh();
 }
 // #@@range_end(console_setwriter)
+
+// #@@range_begin(set_window)
+// for 콘솔이 PixelWriter 대신 Window를 사용하게 되는 타이밍에 적절히 전환
+void Console::SetWindow(const std::shared_ptr<Window>& window) {
+	if (window == window_) {
+		return;
+	}
+	window_ = window;
+	writer_ = window->Writer();
+	Refresh(); // 콘솔 전체를 다시 그릴 필요
+}
+// #@@range_end(set_window)
 
 // #@@range_begin(newline)
 void Console::Newline() {
 	cursor_column_ = 0;
 	if (cursor_row_ < kRows - 1) {
 		++cursor_row_;
-	} else { // 커서가 최하단에 있을 때, 표시영역 전체를 올려서 스크롤 처리
-		for (int y = 0; y < 16 * kRows; ++y) { // 1. 표시영역 전체를 배격으로 채우기
-			for (int x = 0; x < 8 * kColumns; ++x) {
-				writer_->Write(x, y, bg_color_);
-			}
-		}
-		for (int row = 0; row < kRows - 1; ++row) { // 2. 한줄 씩 buffer_내용 갱신, 랜더링
+		return;
+	}
+
+	if (window_) {
+		// 2nd ~ nth line 까지 이미지 이동
+		Rectangle<int> move_src{{0, 16}, {8 * kColumns, 16 * (kRows - 1)}};
+		window_->Move({0, 0}, move_src);
+		// 마지막 줄 직사각형으로 렌더링
+		FillRectangle(*writer_, {0, 16 * (kRows - 1)}, {8 * kColumns, 16}, bg_color_);
+	} else {
+		FillRectangle(*writer_, {0, 0}, {8 * kColumns, 16 * kRows}, bg_color_);
+		for (int row = 0; row < kRows - 1; ++row) {
 			memcpy(buffer_[row], buffer_[row + 1], kColumns + 1);
-			WriteString(*writer_, 0, 16 * row, buffer_[row], fg_color_);
+			WriteString(*writer_, Vector2D<int>{0, 16 * row}, buffer_[row], fg_color_);
 		}
 		memset(buffer_[kRows - 1], 0, kColumns + 1);
 	}
@@ -62,7 +80,7 @@ void Console::Newline() {
 // #@@range_begin(console_refresh)
 void Console::Refresh() {
 	for (int row = 0; row < kRows; ++row) {
-		WriteString(*writer_, 0, 16 * row, buffer_[row], fg_color_);
+		WriteString(*writer_, Vector2D<int>{0, 16 * row}, buffer_[row], fg_color_);
 	}
 }
 // #@@range_end(console_refresh)

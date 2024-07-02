@@ -5,6 +5,7 @@
 #include <vector>
 // #@@range_begin(includes)
 #include "frame_buffer_config.hpp"
+#include "memory_map.hpp"
 #include "graphics.hpp" // image 관련 코드
 #include "mouse.hpp"
 #include "font.hpp" // font 관련 코드
@@ -13,6 +14,11 @@
 #include "interrupt.hpp"
 #include "asmfunc.h"
 #include "queue.hpp"
+#include "segment.hpp"
+#include "paging.hpp"
+#include "memory_manager.hpp"
+#include "window.hpp"
+#include "layer.hpp"
 
 #include "logger.hpp"
 #include "usb/memory.hpp"
@@ -21,9 +27,6 @@
 #include "usb/xhci/xhci.hpp"
 #include "usb/xhci/trb.hpp"
 // #@@range_end(includes)
-
-const PixelColor kDesktopBGColor{42, 42, 42};
-const PixelColor kDesktopFGColor{0, 240, 0};
 
 char pixel_writer_buf[sizeof(RGBResv8BitPerColorPixelWriter)];
 PixelWriter* pixel_writer;
@@ -48,14 +51,19 @@ int printk(const char* format, ...) {
 }
 // #@@range_end(printk)
 
-// #@@range_begin(mouse_observer)
-char mouse_cursor_buf[sizeof(MouseCursor)];
-MouseCursor* mouse_cursor;
+// #@@range_begin(memman_buf)
+char memory_manager_buf[sizeof(BitmapMemoryManager)];
+BitmapMemoryManager* memory_manager;
+// #@@range_end(memman_buf)
+
+// #@@range_begin(layermgr_mousehandler)
+unsigned int mouse_layer_id;
 
 void MouseObserver(int8_t displacement_x, int8_t displacement_y) {
-	mouse_cursor->MoveRelative({displacement_x, displacement_y});
+	layer_manager->MoveRelative(mouse_layer_id, {displacement_x, displacement_y});
+	layer_manager->Draw();
 }
-// #@@range_end(mouse_observer)
+// #@@range_end(layermgr_mousehandler)
 
 // #@@range_begin(switch_echi2xhci)
 void SwitchEhci2Xhci(const pci::Device& xhc_dev) {
@@ -109,35 +117,34 @@ void IntHandlerXHCI(InterruptFrame* frame) {
 }
 // #@@range_end(xhci_handler)
 
-// #@@range_begin(call_pixel_writer)
-extern "C" void KernelMain(const FrameBufferConfig& frame_buffer_config) {
+// #@@range_begin(main_new_stack)
+alignas(16) uint8_t kernel_main_stack[1024 * 1024]; // 배열 시작 주소 16의 배수로 배치 보장, 1byte 요소, 1MB 스택
+
+extern "C" void KernelMainNewStack(
+	const FrameBufferConfig& frame_buffer_config_ref, const MemoryMap& memory_map_ref) {
+	FrameBufferConfig frame_buffer_config{frame_buffer_config_ref};
+	MemoryMap memory_map{memory_map_ref};
+// #@@range_end(main_new_stack)
+
 	switch (frame_buffer_config.pixel_format) {
 		case kPixelRGBResv8BitPerColor:
 			pixel_writer = new(pixel_writer_buf)
-			RGBResv8BitPerColorPixelWriter{frame_buffer_config};
+				RGBResv8BitPerColorPixelWriter{frame_buffer_config};
 			break;
 		case kPixelBGRResv8BitPerColor:
 			pixel_writer = new(pixel_writer_buf)
-			BGRResv8BitPerColorPixelWriter{frame_buffer_config};
+				BGRResv8BitPerColorPixelWriter{frame_buffer_config};
 			break;
 	}
-	
-	const int kFrameWidth = frame_buffer_config.horizontal_resolution;
-	const int kFrameHeight = frame_buffer_config.vertical_resolution;
 
 	// #@@range_begin(draw_desktop)
-	FillRectangle(*pixel_writer,
-		{0, 0},
-		{kFrameWidth, kFrameHeight - 30},
-		kDesktopBGColor);
-	FillRectangle(*pixel_writer,
-		{0, kFrameHeight - 30},
-		{kFrameWidth, 30},
-		{1, 1, 1});
+	DrawDesktop(*pixel_writer);
 
 	console = new(console_buf) Console{
-		*pixel_writer, kDesktopFGColor, kDesktopBGColor
+		kDesktopFGColor, kDesktopBGColor
 	};
+	// 생성자를 전달했지만, 재설정을 위한 설정용 메서드 사용
+	console->SetWriter(pixel_writer);
 	// here KosmOS Ascii
 	printk("Welcome to KosmOS!\n");
 	printk(" /$$   /$$                                    /$$$$$$   /$$$$$$ \n");
@@ -148,15 +155,62 @@ extern "C" void KernelMain(const FrameBufferConfig& frame_buffer_config) {
 	printk("| $$:  $$ | $$  | $$ :____  $$| $$ | $$ | $$| $$  | $$ /$$  : $$\n");
 	printk("| $$ :  $$|  $$$$$$/ /$$$$$$$/| $$ | $$ | $$|  $$$$$$/|  $$$$$$/\n");
 	printk("|__/  :__/ :______/ |_______/ |__/ |__/ |__/ :______/  :______/ \n");
+	SetLogLevel(kWarn);
 	// #@@range_end(draw_desktop)
 	
-	SetLogLevel(kWarn);
+	// #@@range_begin(setup_segments_and_page)
+	SetupSegments(); // GDT 재구축 처리
 
-	// #@@range_begin(new_mouse_cursor)
-	mouse_cursor = new(mouse_cursor_buf) MouseCursor{
-		pixel_writer, kDesktopBGColor, {300, 200}
-	};
-	// #@@range_end(new_mouse_cursor)
+	const uint16_t kernel_cs = 1 << 3; // gdt[1] // 8
+	const uint16_t kernel_ss = 2 << 3; // gdt[2] // 16
+	SetDSAll(0); // 이미 새로운 GDT를 가리키도록 대체된 상태
+	SetCSSS(kernel_cs, kernel_ss);
+	// GDTR 재설정 후 CS 갱신할 때 까지 프로그램이 동작 할 수 있는 것: 숨겨진 영역 덕분
+	// 숨겨진 영역: 세그먼트 디스크립터의 cache (동일한 내용 유지), 해당 정보를 이용한 갱신
+	
+	SetupIdentityPageTable();
+	// #@@range_end(setup_segments_and_page)
+
+	// #@@range_begin(mark_allocated)
+	::memory_manager = new(memory_manager_buf) BitmapMemoryManager;
+	
+	const auto memory_map_base = reinterpret_cast<uintptr_t>(memory_map.buffer);
+	uintptr_t available_end = 0;
+	
+	// #@@range_begin(print_memory_map)
+	for (uintptr_t iter = memory_map_base;
+			 iter < memory_map_base + memory_map.map_size;
+			 iter += memory_map.descriptor_size) {
+		auto desc = reinterpret_cast<const MemoryDescriptor*>(iter);
+		// UEFI BIOS version에 따라 취득된 데이터가 다를 가능성이 있다.
+		if (available_end < desc->physical_start) {
+			memory_manager->MarkAllocated(
+					FrameID{available_end / kBytesPerFrame}, // id
+					(desc->physical_start - available_end) / kBytesPerFrame); // size
+		}
+		
+		const auto physical_end = desc->physical_start + desc->number_of_pages * kUEFIPageSize;
+			
+		if (IsAvailable(static_cast<MemoryType>(desc->type))) {
+			available_end = physical_end;
+		} else {
+			memory_manager->MarkAllocated(
+					FrameID{desc->physical_start / kBytesPerFrame}, // id
+					// 추후 page frame 크기를 바꿔서 OS 다룰 때 버그 발생 시키지 않도록
+					// 바이트 단위 변환 -> 페이지 프레임 단위 변환
+					desc->number_of_pages * kUEFIPageSize / kBytesPerFrame); // size
+		}
+	}
+	// 사용중인 영역 마킹 후, 물리 메모리 크기 설정
+	// #@@range_begin(initialize_heap)
+	memory_manager->SetMemoryRange(FrameID{1}, FrameID{available_end / kBytesPerFrame});
+
+	if (auto err = InitializeHeap(*memory_manager)) {
+	Log(kError, "failed to allocate pages: %s at %s:%d\n",
+			err.Name(), err.File(), err.Line());
+		exit(1);
+	}
+	// #@@range_end(initialize_heap)
 
 	std::array<Message, 32> main_queue_data;
 	ArrayQueue<Message> main_queue{main_queue_data};
@@ -196,10 +250,9 @@ extern "C" void KernelMain(const FrameBufferConfig& frame_buffer_config) {
 	// #@@range_end(find_xhc)
 
 	// #@@range_begin(load_idt)
-	const uint16_t cs = GetCS(); // 현재 code segment 값 get
 	// InterruptVector::kXHCI : 0x40 정의
 	SetIDTEntry(idt[InterruptVector::kXHCI], MakeIDTAttr(DescriptorType::kInterruptGate, 0),
-							reinterpret_cast<uint64_t>(IntHandlerXHCI), cs); // 현재 code segment 값 지정
+							reinterpret_cast<uint64_t>(IntHandlerXHCI), kernel_cs); // 현재 code segment 값 지정
 	LoadIDT(sizeof(idt) - 1, reinterpret_cast<uintptr_t>(&idt[0]));
 	// #@@range_end(load_idt)
 
@@ -263,6 +316,39 @@ extern "C" void KernelMain(const FrameBufferConfig& frame_buffer_config) {
 	}
 	// #@@range_end(configure_port)
 	
+	// #@@range_begin(main_window)
+	const int kFrameWidth = frame_buffer_config.horizontal_resolution;
+	const int kFrameHeight = frame_buffer_config.vertical_resolution;
+
+	// BackGroundWindow, BackGroundWriter
+	auto bgwindow = std::make_shared<Window>(kFrameWidth, kFrameHeight);
+	auto bgwriter = bgwindow->Writer();
+
+	DrawDesktop(*bgwriter);
+	console->SetWriter(bgwriter);
+
+	auto mouse_window = std::make_shared<Window>(
+			kMouseCursorWidth, kMouseCursorHeight);
+	mouse_window->SetTransparentColor(kMouseTransparentColor);
+	DrawMouseCursor(mouse_window->Writer(), {0, 0});
+
+	layer_manager = new LayerManager;
+	layer_manager->SetWriter(pixel_writer);
+
+	auto bglayer_id = layer_manager->NewLayer()
+		.SetWindow(bgwindow)
+		.Move({0, 0})
+		.ID();
+	mouse_layer_id = layer_manager->NewLayer()
+		.SetWindow(mouse_window)
+		.Move({200, 200})
+		.ID();
+
+	layer_manager->UpDown(bglayer_id, 0);
+	layer_manager->UpDown(mouse_layer_id, 1);
+	layer_manager->Draw(); // layer_manager -> pixel_writer -> frame_buffer로 쓰기
+	// #@@range_end(main_window)
+  
 	// #@@range_begin(event_loop)
 	while (true) {
 		// #@@range_begin(get_front_message)

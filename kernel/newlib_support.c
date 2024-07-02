@@ -5,10 +5,21 @@ void _exit(void) {
 	while (1) __asm__("hlt");
 }
 
+// #@@range_begin(sbrk)
+// 정의 시점에 초기화 X but, 값이 설정돼 있다는 것을 전제로 동작
+caddr_t program_break, program_break_end;
+
 caddr_t sbrk(int incr) {
-	errno = ENOMEM;
-	return (caddr_t)-1;
+	if (program_break == 0 || program_break + incr >= program_break_end) {
+		errno = ENOMEM;
+		return (caddr_t)-1;
+	}
+
+	caddr_t prev_break = program_break;
+	program_break += incr;
+	return prev_break;
 }
+// #@@range_end(sbrk)
 
 int getpid(void) {
 	return 1;

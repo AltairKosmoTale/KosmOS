@@ -44,3 +44,65 @@ LoadIDT:
     pop rbp
     ret
 ; #@@range_end(load_idt_function)
+
+; #@@range_begin(load_gdt)
+global LoadGDT	; void LoadGDT(uint16_t limit, uint64_t offset);
+LoadGDT:
+	push rbp
+	mov rbp, rsp
+	sub rsp, 10 ; 10 byte 영역 확보
+	mov [rsp], di ; 2 byte 영역에 DI 내용 복사 (첫 파라미터: rdi 하위 16 bit)
+	mov [rsp + 2], rsi	; offset ; GDT 시작 주소 (rsi: 메모리 이동 or 비교 시 출발지 주소)
+	lgdt [rsp] ; GDT 설정할 수 있는 Intel Architecture 특수 명령 ; C++ 불가
+	; limit, offset을 GDTR 레지스터에 설정 (80 bit -> 10 byte)
+	mov rsp, rbp
+	pop rbp
+	ret
+; #@@range_end(load_gdt)
+
+; #@@range_begin(set_cs)
+global SetCSSS	; void SetCSSS(uint16_t cs, uint16_t ss);
+SetCSSS:
+	push rbp
+	mov rbp, rsp
+	mov ss, si
+	mov rax, .next
+	push rdi ; CS ; CS가 가리키는 디스크립터의 설정 내용에 따라 엑세스 권한 검사 수행
+	push rax ; RIP
+	o64 retf ; far return: far call(다른 세그먼트로 jmp)의 복귀 / 스택에서 값 얻어 CS, RIP 설정
+	; retf default: 32 비트 so, o64로 64비트 값 가져오게 설정
+.next:
+	mov rsp, rbp
+	pop rbp
+	ret
+; #@@range_end(set_cs)
+
+; #@@range_begin(set_dsall)
+global SetDSAll	; void SetDSAll(uint16_t value);
+SetDSAll: ; 파라미터 복사 ; 0을 전달해서 Null Descriptor 가리키도록 설정
+	mov ds, di
+	mov es, di
+	mov fs, di
+	mov gs, di
+	ret
+; #@@range_end(set_dsall)
+
+; #@@range_begin(set_cr3)
+global SetCR3	; void SetCR3(uint64_t value);
+SetCR3:
+	mov cr3, rdi
+	ret
+; #@@range_end(set_cr3)
+
+; #@@range_begin(set_main_stack)
+extern kernel_main_stack
+extern KernelMainNewStack
+
+global KernelMain
+KernelMain:
+	mov rsp, kernel_main_stack + 1024 * 1024
+	call KernelMainNewStack ; 새로운 stack에는 KernelMain()의 복귀 주소 X
+.fin: ; 돌아올일 없지만 만일의 경우를 위한 loop
+	hlt
+	jmp .fin
+; #@@range_end(set_main_stack)

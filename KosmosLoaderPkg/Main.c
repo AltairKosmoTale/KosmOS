@@ -10,18 +10,8 @@
 #include <Protocol/BlockIo.h>
 #include <Guid/FileInfo.h>
 #include "frame_buffer_config.hpp"
+#include "memory_map.hpp"
 #include "elf.hpp"
-
-// #@@range_begin(struct_memory_map)
-struct MemoryMap {
-	UINTN buffer_size;
-	VOID* buffer;
-	UINTN map_size;
-	UINTN map_key;
-	UINTN descriptor_size;
-	UINT32 descriptor_version;
-};
-// #@@range_end(struct_memory_map)
 
 // #@@range_begin(get_memory_map)
 EFI_STATUS GetMemoryMap(struct MemoryMap* map) {
@@ -431,10 +421,10 @@ EFI_STATUS EFIAPI UefiMain(
 			Print(L"Unimplemented pixel format: %d\n", gop->Mode->Info->PixelFormat);
 			Halt();
 	}
-
-	typedef void __attribute__((sysv_abi)) EntryPointType(const struct FrameBufferConfig*);
+	
+	typedef void __attribute__((sysv_abi)) EntryPointType(const struct FrameBufferConfig*, const struct MemoryMap*);
 	EntryPointType* entry_point = (EntryPointType*)entry_addr;
-	entry_point(&config);
+	entry_point(&config, &memmap);
 	// #@@range_end(pass_frame_buffer_config)
 	// #@@range_end(call_kernel)
 	

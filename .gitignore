@@ -3,3 +3,8 @@
 *.bin
 *.elf
 *.swp
+
+/*.bin
+/*.elf
+/html
+/ipxe_root

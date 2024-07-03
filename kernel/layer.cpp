@@ -23,6 +23,21 @@ std::shared_ptr<Window> Layer::GetWindow() const {
 }
 // #@@range_end(layer_setget_window)
 
+Vector2D<int> Layer::GetPosition() const {
+	return pos_;
+}
+
+// #@@range_begin(set_draggable)
+Layer& Layer::SetDraggable(bool draggable) {
+	draggable_ = draggable;
+	return *this;
+}
+
+bool Layer::IsDraggable() const {
+	return draggable_;
+}
+// #@@range_end(set_draggable)
+
 // #@@range_begin(layer_move)
 Layer& Layer::Move(Vector2D<int> pos) {
 	pos_ = pos;
@@ -36,9 +51,9 @@ Layer& Layer::MoveRelative(Vector2D<int> pos_diff) {
 // #@@range_end(layer_move)
 
 // #@@range_begin(layer_drawto)
-void Layer::DrawTo(FrameBuffer& screen) const {
+void Layer::DrawTo(FrameBuffer& screen, const Rectangle<int>& area) const {
 	if (window_) {
-		window_->DrawTo(screen, pos_); // 레이어가 위치를 관리
+		window_->DrawTo(screen, pos_, area); // 레이어가 위치를 관리
 	}
 }
 // #@@range_end(layer_drawto)
@@ -47,6 +62,10 @@ void Layer::DrawTo(FrameBuffer& screen) const {
 // #@@range_begin(layermgr_setwriter)
 void LayerManager::SetWriter(FrameBuffer* screen) {
 	screen_ = screen;
+	// back_buffer_ 초기화
+	FrameBufferConfig back_config = screen->Config();
+	back_config.frame_buffer = nullptr;
+	back_buffer_.Initialize(back_config);	
 }
 // #@@range_end(layermgr_setwriter)
 
@@ -62,25 +81,59 @@ Layer& LayerManager::NewLayer() {
 // #@@range_end(layermgr_newlayer)
 
 // #@@range_begin(layermgr_draw)
-void LayerManager::Draw() const {
+// LayerManager::Draw (Overloading)
+// 렌더링 범위를 파라미터로 지정
+// #@@range_begin(draw_area)
+void LayerManager::Draw(const Rectangle<int>& area) const {
 	// layer_stack_ 배열은 선두가 가장 아래쪽, 배열 끝이 가장 위쪽
 	for (auto layer : layer_stack_) {
-		layer->DrawTo(*screen_);
+		layer->DrawTo(back_buffer_, area);
 	}
+	// 렌더링 후 screen_에 복사
+	screen_->Copy(area.pos, back_buffer_, area);
 }
-// #@@range_end(layermgr_draw)
+// #@@range_end(draw_area)
+
+// #@@range_begin(draw_layer)
+// 지정된 레이어와 그 보다 위에 있는 레이어만 렌더링
+void LayerManager::Draw(unsigned int id) const {
+	bool draw = false;
+	Rectangle<int> window_area;
+	for (auto layer : layer_stack_) {
+		if (layer->ID() == id) {
+			window_area.size = layer->GetWindow()->Size();
+			window_area.pos = layer->GetPosition();
+			draw = true;
+		}
+		if (draw) {
+			layer->DrawTo(back_buffer_, window_area);
+		}
+	}
+	// 렌더링 후 screen_에 복사
+	screen_->Copy(window_area.pos, back_buffer_, window_area);
+}
+// #@@range_end(draw_layer)
 
 // #@@range_begin(layermgr_move)
 // FindLayer() ID 유효성 확인을 호출 측의 책임으로 위임 -> Move() Null 체크 생략
-
-void LayerManager::Move(unsigned int id, Vector2D<int> new_position) {
-	FindLayer(id)->Move(new_position);
-}
-
-void LayerManager::MoveRelative(unsigned int id, Vector2D<int> pos_diff) {
-	FindLayer(id)->MoveRelative(pos_diff);
+void LayerManager::Move(unsigned int id, Vector2D<int> new_pos) {
+	auto layer = FindLayer(id);
+	const auto window_size = layer->GetWindow()->Size();
+	const auto old_pos = layer->GetPosition();
+	layer->Move(new_pos);
+	Draw({old_pos, window_size});
+	Draw(id);
 }
 // #@@range_end(layermgr_move)
+
+void LayerManager::MoveRelative(unsigned int id, Vector2D<int> pos_diff) {
+	auto layer = FindLayer(id);
+	const auto window_size = layer->GetWindow()->Size();
+	const auto old_pos = layer->GetPosition();
+	layer->MoveRelative(pos_diff);
+	Draw({old_pos, window_size});
+	Draw(id);
+}
 
 // #@@range_begin(layermgr_updown)
 void LayerManager::UpDown(unsigned int id, int new_height) {
@@ -120,6 +173,30 @@ void LayerManager::Hide(unsigned int id) {
 	}
 }
 // #@@range_end(layermgr_hide)
+
+// #@@range_begin(layermgr_findlayer_bypos)
+Layer* LayerManager::FindLayerByPosition(Vector2D<int> pos, unsigned int exclude_id) const {
+	auto pred = [pos, exclude_id](Layer* layer) { // 마우스 제외를 위함
+		if (layer->ID() == exclude_id) {
+			return false;
+		}
+		const auto& win = layer->GetWindow();
+		if (!win) {
+			return false;
+		}
+		const auto win_pos = layer->GetPosition();
+		const auto win_end_pos = win_pos + win->Size();
+		return win_pos.x <= pos.x && pos.x < win_end_pos.x &&
+					 win_pos.y <= pos.y && pos.y < win_end_pos.y;
+	};
+	// r: reverse
+	auto it = std::find_if(layer_stack_.rbegin(), layer_stack_.rend(), pred);
+	if (it == layer_stack_.rend()) {
+		return nullptr;
+	}
+	return *it;
+}
+// #@@range_end(layermgr_findlayer_bypos)
 
 // #@@range_begin(layermgr_findlayer)
 Layer* LayerManager::FindLayer(unsigned int id) {

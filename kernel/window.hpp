@@ -29,8 +29,10 @@ class Window {
 	Window(const Window& rhs) = delete;
 	Window& operator=(const Window& rhs) = delete;
 	// 주어진 FrameBuffer에 이 윈도우의 표시 영역을 렌더링
-	// @param dst: 렌더링 target, @param position: writer의 왼쪽 상단 기준 렌더링 위치
-	void DrawTo(FrameBuffer& dst, Vector2D<int> position);
+	// @param dst: 렌더링 target
+	// @param pos: dst 좌측 상단을 기준으로 한 윈도우 위치
+	// @param area: dst의 좌측 상단을 기준으로 한 그리기 대상 범위
+	void DrawTo(FrameBuffer& dst, Vector2D<int> pos, const Rectangle<int>& area);
 	// 표시 영역 투명색 설정
 	void SetTransparentColor(std::optional<PixelColor> c);
 	// 인스턴스와 연결된 WindowWriter 취득
@@ -42,6 +44,7 @@ class Window {
 	int Width() const;
 	// 평명 렌더링 영역의 "세로" 픽셀 단위로 반환
 	int Height() const;
+	Vector2D<int> Size() const;
 	void Move(Vector2D<int> dst_pos, const Rectangle<int>& src);
 	
  private:
@@ -55,3 +58,5 @@ class Window {
 	// #@@range_end(fields)
 };
 // #@@range_end(window)
+
+void DrawWindow(PixelWriter& writer, const char* title);

@@ -19,7 +19,7 @@
 #include "memory_manager.hpp"
 #include "window.hpp"
 #include "layer.hpp"
-#include "timer.hpp"
+//#include "timer.hpp"
 
 #include "logger.hpp"
 #include "usb/memory.hpp"
@@ -46,13 +46,6 @@ int printk(const char* format, ...) {
 	va_start(ap, format);
 	result = vsprintf(s, format, ap);
 	va_end(ap);
-
-	StartLAPICTimer();
-	console->PutString(s);
-	auto elapsed = LAPICTimerElapsed();
-	StopLAPICTimer();
-
-	sprintf(s, "[%9d]", elapsed);
   
 	console->PutString(s);
 	return result;
@@ -66,15 +59,46 @@ BitmapMemoryManager* memory_manager;
 
 // #@@range_begin(layermgr_mousehandler)
 unsigned int mouse_layer_id;
+Vector2D<int> screen_size;
+Vector2D<int> mouse_position;
 
-void MouseObserver(int8_t displacement_x, int8_t displacement_y) {
-	layer_manager->MoveRelative(mouse_layer_id, {displacement_x, displacement_y});
-	StartLAPICTimer();
-	layer_manager->Draw();
-	auto elapsed = LAPICTimerElapsed();
-	StopLAPICTimer();
-	printk("MouseObserver: elapsed = %u\n", elapsed);	
+// #@@range_begin(mouse_observer)
+// 버틀을 떼면 0, 누르면 1
+void MouseObserver(uint8_t buttons, int8_t displacement_x, int8_t displacement_y) {
+	static unsigned int mouse_drag_layer_id = 0; // 마우스로 drag 하는 레이어 기억
+	static uint8_t previous_buttons = 0; // 1회 전의 버튼 누름 상태 기억
+	const auto oldpos = mouse_position;
+	auto newpos = mouse_position + Vector2D<int>{displacement_x, displacement_y};
+	newpos = ElementMin(newpos, screen_size + Vector2D<int>{-1, -1});
+	// if (newpos.x > screen_size.x - 1) {newpos.x = screen_size.x - 1;}
+	// if (newpos.y > screen_size.y - 1) {newpos.y = screen_size.y - 1;}
+	mouse_position = ElementMax(newpos, {0, 0});
+	
+	// 마우스 커서 이동량: displacement_xy 대신 쓰는 이유: 가장자리 고려 계산
+	const auto posdiff = mouse_position - oldpos; 
+	
+	layer_manager->Move(mouse_layer_id, mouse_position);
+	const bool previous_left_pressed = (previous_buttons & 0x01);
+	const bool left_pressed = (buttons & 0x01);
+	// #@@range_begin(check_draggable)
+	if (!previous_left_pressed && left_pressed) {
+		auto layer = layer_manager->FindLayerByPosition(mouse_position, mouse_layer_id);
+		if (layer && layer->IsDraggable()) { // drag 가능성 체크
+			mouse_drag_layer_id = layer->ID();
+		}
+	// #@@range_end(check_draggable)
+	} else if (previous_left_pressed && left_pressed) {
+		if (mouse_drag_layer_id > 0) {
+			layer_manager->MoveRelative(mouse_drag_layer_id, posdiff);
+		}
+	} else if (previous_left_pressed && !left_pressed) {
+		// 왼쪽 버튼을 떼면 0으로 리셋
+		mouse_drag_layer_id = 0;
+	}
+
+	previous_buttons = buttons;
 }
+// #@@range_end(mouse_observer)
 // #@@range_end(layermgr_mousehandler)
 
 // #@@range_begin(switch_echi2xhci)
@@ -168,7 +192,6 @@ extern "C" void KernelMainNewStack(
 	printk("| $$ :  $$|  $$$$$$/ /$$$$$$$/| $$ | $$ | $$|  $$$$$$/|  $$$$$$/\n");
 	printk("|__/  :__/ :______/ |_______/ |__/ |__/ |__/ :______/  :______/ \n");
 	SetLogLevel(kWarn);
-	InitializeLAPICTimer();
 	// #@@range_end(draw_desktop)
 	
 	// #@@range_begin(setup_segments_and_page)
@@ -330,12 +353,14 @@ extern "C" void KernelMainNewStack(
 	// #@@range_end(configure_port)
 	
 	// #@@range_begin(main_window)
-	const int kFrameWidth = frame_buffer_config.horizontal_resolution;
-	const int kFrameHeight = frame_buffer_config.vertical_resolution;
+	// #@@range_begin(screen_size)
+	screen_size.x = frame_buffer_config.horizontal_resolution;
+	screen_size.y = frame_buffer_config.vertical_resolution;
+	// #@@range_end(screen_size)
 
 	// BackGroundWindow, BackGroundWriter
 	auto bgwindow = std::make_shared<Window>(
-		kFrameWidth, kFrameHeight, frame_buffer_config.pixel_format);
+		screen_size.x, screen_size.y, frame_buffer_config.pixel_format);
 	auto bgwriter = bgwindow->Writer();
 
 	// #@@range_begin(set_window)
@@ -347,7 +372,20 @@ extern "C" void KernelMainNewStack(
 			kMouseCursorWidth, kMouseCursorHeight, frame_buffer_config.pixel_format);
 	mouse_window->SetTransparentColor(kMouseTransparentColor);
 	DrawMouseCursor(mouse_window->Writer(), {0, 0});
+	mouse_position = {200, 200};
 
+	// #@@range_begin(make_window)
+	auto main_window = std::make_shared<Window>(
+		160, 52, frame_buffer_config.pixel_format);
+	DrawWindow(*main_window->Writer(), "Hello Window");
+	// #@@range_end(make_window)
+ 
+	// #@@range_begin(make_console_window)
+	auto console_window = std::make_shared<Window>(
+		Console::kColumns * 8, Console::kRows * 16, frame_buffer_config.pixel_format);
+	console->SetWindow(console_window);
+	// #@@range_end(make_console_window)
+  
 	// #@@range_begin(create_screen)
 	FrameBuffer screen;
 	if (auto err = screen.Initialize(frame_buffer_config)) {
@@ -363,23 +401,57 @@ extern "C" void KernelMainNewStack(
 		.ID();
 	mouse_layer_id = layer_manager->NewLayer()
 		.SetWindow(mouse_window)
-		.Move({200, 200})
+		.Move(mouse_position)
 		.ID();
+	// #@@range_begin(main_window_draggable)
+	auto main_window_layer_id = layer_manager->NewLayer()
+		.SetWindow(main_window)
+		.SetDraggable(true)
+		.Move({300, 100})
+		.ID();
+	// #@@range_end(main_window_draggable)
 
+	// #@@range_begin(make_console_layer)
+	console->SetLayerID(layer_manager->NewLayer()
+		.SetWindow(console_window)
+		.Move({0, 0})
+		.ID());
+	// #@@range_end(make_console_layer)
+
+	// #@@range_begin(draw_all_layer)
 	layer_manager->UpDown(bglayer_id, 0);
-	layer_manager->UpDown(mouse_layer_id, 1);
-	layer_manager->Draw(); // layer_manager -> pixel_writer -> frame_buffer로 쓰기
+	layer_manager->UpDown(console->LayerID(), 1);
+	layer_manager->UpDown(main_window_layer_id, 2);
+	layer_manager->UpDown(mouse_layer_id, 3);
+	// layer_manager -> pixel_writer -> frame_buffer로 쓰기
+	layer_manager->Draw({{0, 0}, screen_size}); // 1회차 렌더링: 화면 전체 -> 렌더링 범위 지정
+	// #@@range_end(draw_all_layer)
 	// #@@range_end(main_window)
-  
+	
+	// #@@range_begin(make_counter)
+	char str[128];
+	unsigned int count = 0;
+	// #@@range_end(make_counter)
+	
 	// #@@range_begin(event_loop)
 	while (true) {
+		// #@@range_begin(show_count)
+		// #@@range_begin(draw_window_layer)
+		++count;
+		sprintf(str, "%010u", count);
+		FillRectangle(*main_window->Writer(), {24, 28}, {8 * 10, 16}, {0xc6, 0xc6, 0xc6});
+		WriteString(*main_window->Writer(), {24, 28}, str, {0, 0, 0});
+		layer_manager->Draw(main_window_layer_id); // 1회 이후, Draw(Layer_id)
+		
 		// #@@range_begin(get_front_message)
 		__asm__("cli"); // CPU interrupt flag to 0 // 외부 interrupt 차단 (race condition 차단 효과 / 완벽 X)
 		if (main_queue.Count() == 0) {
-			__asm__("sti\n\thlt");
+			__asm__("sti");
 			continue;
 		}
-
+		// #@@range_end(draw_window_layer)
+		// #@@range_end(show_count)
+		
 		Message msg = main_queue.Front();
 		main_queue.Pop();
 		__asm__("sti"); // CPU interrupt flag to 1 // 외부 interrupt 승인

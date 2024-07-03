@@ -26,6 +26,27 @@ struct Vector2D {
 		y += rhs.y;
 		return *this;
 	}
+
+	template <typename U>
+	Vector2D<T> operator +(const Vector2D<U>& rhs) const {
+		auto tmp = *this;
+		tmp += rhs;
+		return tmp;
+	}
+
+	template <typename U>
+	Vector2D<T>& operator -=(const Vector2D<U>& rhs) {
+		x -= rhs.x;
+		y -= rhs.y;
+		return *this;
+	}
+
+	template <typename U>
+	Vector2D<T> operator -(const Vector2D<U>& rhs) const {
+		auto tmp = *this;
+		tmp -= rhs;
+		return tmp;
+	}
 };
 
 template <typename T, typename U>
@@ -49,6 +70,24 @@ template <typename T>
 struct Rectangle {
 	Vector2D<T> pos, size;
 };
+
+// #@@range_begin(rect_inetersection)
+template <typename T, typename U>
+// 연산자 오버로딩 "&"
+Rectangle<T> operator&(const Rectangle<T>& lhs, const Rectangle<U>& rhs) {
+	const auto lhs_end = lhs.pos + lhs.size;
+	const auto rhs_end = rhs.pos + rhs.size;
+	// 겹치지 않는 조건들에 대한 || -> 면적이 0인 사각형 반환
+	if (lhs_end.x < rhs.pos.x || lhs_end.y < rhs.pos.y ||
+			rhs_end.x < lhs.pos.x || rhs_end.y < lhs.pos.y) {
+		return {{0, 0}, {0, 0}};
+	}
+
+	auto new_pos = ElementMax(lhs.pos, rhs.pos);
+	auto new_size = ElementMin(lhs_end, rhs_end) - new_pos;
+	return {new_pos, new_size};
+}
+// #@@range_end(rect_inetersection)
 
 // #@@range_begin(pixel_writer)
 class PixelWriter {

@@ -7,8 +7,9 @@
 // #@@range_begin(constructor)
 Console::Console(const PixelColor& fg_color, const PixelColor& bg_color)
 	: writer_{nullptr}, window_{}, fg_color_{fg_color}, bg_color_{bg_color},
-		buffer_{}, cursor_row_{0}, cursor_column_{0} { // buffer Null로 초기화
+		buffer_{}, cursor_row_{0}, cursor_column_{0}, layer_id_{0} { // buffer Null로 초기화
 }
+
 // #@@range_end(constructor)
 
 // #@@range_begin(put_string)
@@ -23,9 +24,11 @@ void Console::PutString(const char* s) {
 		}
 		++s;
 	}
+	// #@@range_begin(draw_specific_layer)
 	if (layer_manager) {
-		layer_manager->Draw();
+		layer_manager->Draw(layer_id_);
 	}
+	// #@@range_end(draw_specific_layer)
 }
 // #@@range_end(put_string)
 
@@ -51,6 +54,16 @@ void Console::SetWindow(const std::shared_ptr<Window>& window) {
 	Refresh(); // 콘솔 전체를 다시 그릴 필요
 }
 // #@@range_end(set_window)
+
+// #@@range_begin(set_layer_id)
+void Console::SetLayerID(unsigned int layer_id) {
+	layer_id_ = layer_id;
+}
+
+unsigned int Console::LayerID() const {
+	return layer_id_;
+}
+// #@@range_end(set_layer_id)
 
 // #@@range_begin(newline)
 void Console::Newline() {
@@ -79,6 +92,7 @@ void Console::Newline() {
 
 // #@@range_begin(console_refresh)
 void Console::Refresh() {
+	FillRectangle(*writer_, {0, 0}, {8 * kColumns, 16 * kRows}, bg_color_);
 	for (int row = 0; row < kRows; ++row) {
 		WriteString(*writer_, Vector2D<int>{0, 16 * row}, buffer_[row], fg_color_);
 	}

@@ -1,4 +1,6 @@
 #include "interrupt.hpp"
+#include "asmfunc.h"
+#include "segment.hpp"
 
 // #@@range_begin(idt_array)
 std::array<InterruptDescriptor, 256> idt;
@@ -23,3 +25,24 @@ void NotifyEndOfInterrupt() { // interrupt의 종료를 CPU에 알림
 	*end_of_interrupt = 0;
 }
 // #@@range_end(notify_eoi)
+
+namespace {
+	std::deque<Message>* msg_queue;
+
+	__attribute__((interrupt)) // 컴파일러가 interrupt handler에 필요한 전 후 처리 삽입
+	void IntHandlerXHCI(InterruptFrame* frame) {
+		msg_queue->push_back(Message{Message::kInterruptXHCI});
+		NotifyEndOfInterrupt();
+	}
+}
+
+void InitializeInterrupt(std::deque<Message>* msg_queue) {
+	::msg_queue = msg_queue;
+
+	// InterruptVector::kXHCI : 0x40 정의
+	SetIDTEntry(idt[InterruptVector::kXHCI],
+		MakeIDTAttr(DescriptorType::kInterruptGate, 0),
+		reinterpret_cast<uint64_t>(IntHandlerXHCI),
+		kKernelCS); // 현재 code segment 값 지정
+	LoadIDT(sizeof(idt) - 1, reinterpret_cast<uintptr_t>(&idt[0]));
+}

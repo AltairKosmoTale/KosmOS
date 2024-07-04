@@ -98,3 +98,16 @@ void Console::Refresh() {
 	}
 }
 // #@@range_end(console_refresh)
+
+Console* console;
+
+namespace {
+	char console_buf[sizeof(Console)];
+}
+
+void InitializeConsole() {
+	console = new(console_buf) Console{
+		kDesktopFGColor, kDesktopBGColor
+	};
+	console->SetWriter(screen_writer);
+}

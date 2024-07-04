@@ -3,6 +3,8 @@
 #include <cstdio>
 #include <numeric>
 #include <vector>
+#include <deque>
+#include <limits>
 // #@@range_begin(includes)
 #include "frame_buffer_config.hpp"
 #include "memory_map.hpp"
@@ -13,29 +15,15 @@
 #include "pci.hpp"
 #include "interrupt.hpp"
 #include "asmfunc.h"
-#include "queue.hpp"
 #include "segment.hpp"
 #include "paging.hpp"
 #include "memory_manager.hpp"
 #include "window.hpp"
 #include "layer.hpp"
-//#include "timer.hpp"
-
+#include "message.hpp"
 #include "logger.hpp"
-#include "usb/memory.hpp"
-#include "usb/device.hpp"
-#include "usb/classdriver/mouse.hpp"
 #include "usb/xhci/xhci.hpp"
-#include "usb/xhci/trb.hpp"
 // #@@range_end(includes)
-
-char pixel_writer_buf[sizeof(RGBResv8BitPerColorPixelWriter)];
-PixelWriter* pixel_writer;
-
-// #@@range_begin(console_buf)
-char console_buf[sizeof(Console)];
-Console* console;
-// #@@range_end(console_buf)
 
 // #@@range_begin(measure_printk)
 int printk(const char* format, ...) {
@@ -52,135 +40,33 @@ int printk(const char* format, ...) {
 }
 // #@@range_end(measure_printk)
 
-// #@@range_begin(memman_buf)
-char memory_manager_buf[sizeof(BitmapMemoryManager)];
-BitmapMemoryManager* memory_manager;
-// #@@range_end(memman_buf)
+std::shared_ptr<Window> main_window;
+unsigned int main_window_layer_id;
+void InitializeMainWindow() {
+	main_window = std::make_shared<Window>(160, 52, screen_config.pixel_format);
+	DrawWindow(*main_window->Writer(), "Hello Window");
 
-// #@@range_begin(layermgr_mousehandler)
-unsigned int mouse_layer_id;
-Vector2D<int> screen_size;
-Vector2D<int> mouse_position;
+	main_window_layer_id = layer_manager->NewLayer()
+		.SetWindow(main_window)
+		.SetDraggable(true)
+		.Move({300, 100})
+		.ID();
 
-// #@@range_begin(mouse_observer)
-// 버틀을 떼면 0, 누르면 1
-void MouseObserver(uint8_t buttons, int8_t displacement_x, int8_t displacement_y) {
-	static unsigned int mouse_drag_layer_id = 0; // 마우스로 drag 하는 레이어 기억
-	static uint8_t previous_buttons = 0; // 1회 전의 버튼 누름 상태 기억
-	const auto oldpos = mouse_position;
-	auto newpos = mouse_position + Vector2D<int>{displacement_x, displacement_y};
-	newpos = ElementMin(newpos, screen_size + Vector2D<int>{-1, -1});
-	// if (newpos.x > screen_size.x - 1) {newpos.x = screen_size.x - 1;}
-	// if (newpos.y > screen_size.y - 1) {newpos.y = screen_size.y - 1;}
-	mouse_position = ElementMax(newpos, {0, 0});
-	
-	// 마우스 커서 이동량: displacement_xy 대신 쓰는 이유: 가장자리 고려 계산
-	const auto posdiff = mouse_position - oldpos; 
-	
-	layer_manager->Move(mouse_layer_id, mouse_position);
-	const bool previous_left_pressed = (previous_buttons & 0x01);
-	const bool left_pressed = (buttons & 0x01);
-	// #@@range_begin(check_draggable)
-	if (!previous_left_pressed && left_pressed) {
-		auto layer = layer_manager->FindLayerByPosition(mouse_position, mouse_layer_id);
-		if (layer && layer->IsDraggable()) { // drag 가능성 체크
-			mouse_drag_layer_id = layer->ID();
-		}
-	// #@@range_end(check_draggable)
-	} else if (previous_left_pressed && left_pressed) {
-		if (mouse_drag_layer_id > 0) {
-			layer_manager->MoveRelative(mouse_drag_layer_id, posdiff);
-		}
-	} else if (previous_left_pressed && !left_pressed) {
-		// 왼쪽 버튼을 떼면 0으로 리셋
-		mouse_drag_layer_id = 0;
-	}
-
-	previous_buttons = buttons;
+	layer_manager->UpDown(main_window_layer_id, std::numeric_limits<int>::max());
 }
-// #@@range_end(mouse_observer)
-// #@@range_end(layermgr_mousehandler)
 
-// #@@range_begin(switch_echi2xhci)
-void SwitchEhci2Xhci(const pci::Device& xhc_dev) {
-	bool intel_ehc_exist = false;
-	for (int i = 0; i < pci::num_device; ++i) {
-		if (pci::devices[i].class_code.Match(0x0cu, 0x03u, 0x20u) /* EHCI */ &&
-				0x8086 == pci::ReadVendorId(pci::devices[i])) {
-			intel_ehc_exist = true;
-			break;
-		}
-	}
-	if (!intel_ehc_exist) {
-		return;
-	}
-
-	uint32_t superspeed_ports = pci::ReadConfReg(xhc_dev, 0xdc); // USB3PRM
-	pci::WriteConfReg(xhc_dev, 0xd8, superspeed_ports); // USB3_PSSEN
-	uint32_t ehci2xhci_ports = pci::ReadConfReg(xhc_dev, 0xd4); // XUSB2PRM
-	pci::WriteConfReg(xhc_dev, 0xd0, ehci2xhci_ports); // XUSB2PR
-	Log(kDebug, "SwitchEhci2Xhci: SS = %02, xHCI = %02x\n",
-			superspeed_ports, ehci2xhci_ports);
-}
-// #@@range_end(switch_echi2xhci)
-
-// #@@range_begin(xhci_handler)
-usb::xhci::Controller* xhc;
-
-// #@@range_begin(queue_message)
-struct Message {
-	enum Type {
-		kInterruptXHCI,
-	} type;
-};
-
-ArrayQueue<Message>* main_queue;
-// #@@range_end(queue_message)
-
-// #@@range_begin(xhci_handler)
-__attribute__((interrupt)) // 컴파일러가 interrupt handler에 필요한 전 후 처리 삽입
-void IntHandlerXHCI(InterruptFrame* frame) {
-	/*while (xhc->PrimaryEventRing()->HasFront()) {
-		if (auto err = ProcessEvent(*xhc)) {
-			Log(kError, "Error while ProcessEvent: %s at %s:%d\n",
-					err.Name(), err.File(), err.Line());
-		}
-	} ProcessEvent 1회 처리시 -> USB로부터 수신한 데이터 해석, MouseObserver 호출, 렌더링 
-	interrupt handler 처리 시간이 길어지면, interrupt 처리 동안 다른 interrupt 못받을 확률이 높아짐
-	동적 메모리 사용하지 않는 Queue(FIFO)를 구현해 해결 */
-	main_queue->Push(Message{Message::kInterruptXHCI});	
-	NotifyEndOfInterrupt();
-}
-// #@@range_end(xhci_handler)
+std::deque<Message>* main_queue;
 
 // #@@range_begin(main_new_stack)
 alignas(16) uint8_t kernel_main_stack[1024 * 1024]; // 배열 시작 주소 16의 배수로 배치 보장, 1byte 요소, 1MB 스택
 
+// #@@range_begin(main_function)
 extern "C" void KernelMainNewStack(
 	const FrameBufferConfig& frame_buffer_config_ref, const MemoryMap& memory_map_ref) {
-	FrameBufferConfig frame_buffer_config{frame_buffer_config_ref};
 	MemoryMap memory_map{memory_map_ref};
 // #@@range_end(main_new_stack)
-
-	switch (frame_buffer_config.pixel_format) {
-		case kPixelRGBResv8BitPerColor:
-			pixel_writer = new(pixel_writer_buf)
-				RGBResv8BitPerColorPixelWriter{frame_buffer_config};
-			break;
-		case kPixelBGRResv8BitPerColor:
-			pixel_writer = new(pixel_writer_buf)
-				BGRResv8BitPerColorPixelWriter{frame_buffer_config};
-			break;
-	}
-
-	// #@@range_begin(draw_desktop)
-	DrawDesktop(*pixel_writer);
-
-	console = new(console_buf) Console{
-		kDesktopFGColor, kDesktopBGColor
-	};
-	// 생성자를 전달했지만, 재설정을 위한 설정용 메서드 사용
-	console->SetWriter(pixel_writer);
+	InitializeGraphics(frame_buffer_config_ref);
+	InitializeConsole();
 	// here KosmOS Ascii
 	printk("Welcome to KosmOS!\n");
 	printk(" /$$   /$$                                    /$$$$$$   /$$$$$$ \n");
@@ -193,240 +79,21 @@ extern "C" void KernelMainNewStack(
 	printk("|__/  :__/ :______/ |_______/ |__/ |__/ |__/ :______/  :______/ \n");
 	SetLogLevel(kWarn);
 	// #@@range_end(draw_desktop)
-	
-	// #@@range_begin(setup_segments_and_page)
-	SetupSegments(); // GDT 재구축 처리
 
-	const uint16_t kernel_cs = 1 << 3; // gdt[1] // 8
-	const uint16_t kernel_ss = 2 << 3; // gdt[2] // 16
-	SetDSAll(0); // 이미 새로운 GDT를 가리키도록 대체된 상태
-	SetCSSS(kernel_cs, kernel_ss);
-	// GDTR 재설정 후 CS 갱신할 때 까지 프로그램이 동작 할 수 있는 것: 숨겨진 영역 덕분
-	// 숨겨진 영역: 세그먼트 디스크립터의 cache (동일한 내용 유지), 해당 정보를 이용한 갱신
-	
-	SetupIdentityPageTable();
-	// #@@range_end(setup_segments_and_page)
+	InitializeSegmentation();
+	InitializePaging();
+	InitializeMemoryManager(memory_map);
+	::main_queue = new std::deque<Message>(32);
+	InitializeInterrupt(main_queue);
 
-	// #@@range_begin(mark_allocated)
-	::memory_manager = new(memory_manager_buf) BitmapMemoryManager;
-	
-	const auto memory_map_base = reinterpret_cast<uintptr_t>(memory_map.buffer);
-	uintptr_t available_end = 0;
-	
-	// #@@range_begin(print_memory_map)
-	for (uintptr_t iter = memory_map_base;
-			 iter < memory_map_base + memory_map.map_size;
-			 iter += memory_map.descriptor_size) {
-		auto desc = reinterpret_cast<const MemoryDescriptor*>(iter);
-		// UEFI BIOS version에 따라 취득된 데이터가 다를 가능성이 있다.
-		if (available_end < desc->physical_start) {
-			memory_manager->MarkAllocated(
-					FrameID{available_end / kBytesPerFrame}, // id
-					(desc->physical_start - available_end) / kBytesPerFrame); // size
-		}
-		
-		const auto physical_end = desc->physical_start + desc->number_of_pages * kUEFIPageSize;
-			
-		if (IsAvailable(static_cast<MemoryType>(desc->type))) {
-			available_end = physical_end;
-		} else {
-			memory_manager->MarkAllocated(
-					FrameID{desc->physical_start / kBytesPerFrame}, // id
-					// 추후 page frame 크기를 바꿔서 OS 다룰 때 버그 발생 시키지 않도록
-					// 바이트 단위 변환 -> 페이지 프레임 단위 변환
-					desc->number_of_pages * kUEFIPageSize / kBytesPerFrame); // size
-		}
-	}
-	// 사용중인 영역 마킹 후, 물리 메모리 크기 설정
-	// #@@range_begin(initialize_heap)
-	memory_manager->SetMemoryRange(FrameID{1}, FrameID{available_end / kBytesPerFrame});
+	InitializePCI();
+	usb::xhci::Initialize();
 
-	if (auto err = InitializeHeap(*memory_manager)) {
-	Log(kError, "failed to allocate pages: %s at %s:%d\n",
-			err.Name(), err.File(), err.Line());
-		exit(1);
-	}
-	// #@@range_end(initialize_heap)
-
-	std::array<Message, 32> main_queue_data;
-	ArrayQueue<Message> main_queue{main_queue_data};
-	::main_queue = &main_queue;
-  
-	auto err = pci::ScanAllBus();
-	Log(kDebug, "ScanAllBus: %s\n", err.Name());
-
-	for (int i = 0; i < pci::num_device; ++i) {
-		const auto& dev = pci::devices[i];
-		auto vendor_id = pci::ReadVendorId(dev);
-		auto class_code = pci::ReadClassCode(dev.bus, dev.device, dev.function);
-		Log(kDebug, "%d.%d.%d: vend %04x, class %08x, head %02x\n",
-				dev.bus, dev.device, dev.function,
-				vendor_id, class_code, dev.header_type);
-	}
-
-	// #@@range_begin(find_xhc)
-	// Intel 제품을 우선으로 해서 xHC 찾기
-	// 하나로 제한 -> 전체 구조를 단순하게 유지 가능 -> intel 제품쪽이 메인 controller 가능성 high
-	pci::Device* xhc_dev = nullptr;
-	for (int i = 0; i < pci::num_device; ++i) {
-		// 0x0c: serial bus controller 전체, 0x03: usb controller, 0x30: xHCI
-		if (pci::devices[i].class_code.Match(0x0cu, 0x03u, 0x30u)) {
-			xhc_dev = &pci::devices[i];
-
-			if (0x8086 == pci::ReadVendorId(*xhc_dev)) { // intel 제품 벤더 ID
-				break;
-			}
-		}
-	}
-
-	if (xhc_dev) {
-		Log(kInfo, "xHC has been found: %d.%d.%d\n",
-				xhc_dev->bus, xhc_dev->device, xhc_dev->function);
-	}
-	// #@@range_end(find_xhc)
-
-	// #@@range_begin(load_idt)
-	// InterruptVector::kXHCI : 0x40 정의
-	SetIDTEntry(idt[InterruptVector::kXHCI], MakeIDTAttr(DescriptorType::kInterruptGate, 0),
-							reinterpret_cast<uint64_t>(IntHandlerXHCI), kernel_cs); // 현재 code segment 값 지정
-	LoadIDT(sizeof(idt) - 1, reinterpret_cast<uintptr_t>(&idt[0]));
-	// #@@range_end(load_idt)
-
-	// #@@range_begin(configure_msi)
-	// BSP (Bootstrap Processor) : 최초로 동작하는 Core
-	const uint8_t bsp_local_apic_id = *reinterpret_cast<const uint32_t*>(0xfee00020) >> 24;
-	pci::ConfigureMSIFixedDestination(
-			*xhc_dev, bsp_local_apic_id, // bsp_local_apic_id = Destinamtion ID (해당 core에 대해)
-			pci::MSITriggerMode::kLevel,
-			pci::MSIDeliveryMode::kFixed,
-			InterruptVector::kXHCI, 0); // 지정한 interrupt 발생시키라는 설정
-	// #@@range_end(configure_msi)
-	
-	// #@@range_begin(read_bar)
-	/* xHCI Spec상, xHC를 제어하는 레지스터: MMIO -> memory address space 어딘가에 register 존재
-	MMIO address: PCI configuration Space의 BAR0에 기재 ->
-	BAR0 ~ BAR5까지 6개의 32bit 폭 (64 표현시 2개 사용) ->
-	ReadBar: 지정된 BAR, 후속 BAR 읽어 결합한 주소 반환 ->
-	최종적으로 xhc_bar = xHC의 MMIO 지정 64bit address 설정 */
-	const WithError<uint64_t> xhc_bar = pci::ReadBar(*xhc_dev, 0);
-	Log(kDebug, "ReadBar: %s\n", xhc_bar.error.Name());
-	// 하위 4bit 플래그 마스크 -> get MMIO Base address
-	const uint64_t xhc_mmio_base = xhc_bar.value & ~static_cast<uint64_t>(0xf);
-	Log(kDebug, "xHC mmio_base = %08lx\n", xhc_mmio_base);
-	// #@@range_end(read_bar)
-
-	// #@@range_begin(init_xhc)
-	// BAR0 값을 이용해 xHC 초기화 (xHC reset, 동작에 필요한 설정)
-	usb::xhci::Controller xhc{xhc_mmio_base};
-
-	if (0x8086 == pci::ReadVendorId(*xhc_dev)) {
-		// Intel 제품 2.0 EHCI(default), 3.0 xHCI 둘다 탑재 -> 설정 필요
-		SwitchEhci2Xhci(*xhc_dev); 
-	}
-	{
-		auto err = xhc.Initialize();
-		Log(kDebug, "xhc.Initialize: %s\n", err.Name());
-	}
-
-	Log(kInfo, "xHC starting\n");
-	xhc.Run(); // xHC 동작 (PC에 연결된 USB의 기기 인식 순차적으로 진행)
-	// #@@range_end(init_xhc)
-
-	::xhc = &xhc;
-	__asm__("sti");
-	
-	// #@@range_begin(configure_port)
-	usb::HIDMouseDriver::default_observer = MouseObserver;
-
-	for (int i = 1; i <= xhc.MaxPorts(); ++i) {
-		auto port = xhc.PortAt(i);
-		Log(kDebug, "Port %d: IsConnected=%d\n", i, port.IsConnected());
-
-		if (port.IsConnected()) {
-			if (auto err = ConfigurePort(xhc, port)) {
-				Log(kError, "failed to configure port: %s at %s:%d\n",
-						err.Name(), err.File(), err.Line());
-				continue;
-			}
-		}
-	}
-	// #@@range_end(configure_port)
-	
-	// #@@range_begin(main_window)
-	// #@@range_begin(screen_size)
-	screen_size.x = frame_buffer_config.horizontal_resolution;
-	screen_size.y = frame_buffer_config.vertical_resolution;
-	// #@@range_end(screen_size)
-
-	// BackGroundWindow, BackGroundWriter
-	auto bgwindow = std::make_shared<Window>(
-		screen_size.x, screen_size.y, frame_buffer_config.pixel_format);
-	auto bgwriter = bgwindow->Writer();
-
-	// #@@range_begin(set_window)
-	DrawDesktop(*bgwriter);
-	console->SetWindow(bgwindow);
-	// #@@range_end(set_window)
-
-	auto mouse_window = std::make_shared<Window>(
-			kMouseCursorWidth, kMouseCursorHeight, frame_buffer_config.pixel_format);
-	mouse_window->SetTransparentColor(kMouseTransparentColor);
-	DrawMouseCursor(mouse_window->Writer(), {0, 0});
-	mouse_position = {200, 200};
-
-	// #@@range_begin(make_window)
-	auto main_window = std::make_shared<Window>(
-		160, 52, frame_buffer_config.pixel_format);
-	DrawWindow(*main_window->Writer(), "Hello Window");
-	// #@@range_end(make_window)
- 
-	// #@@range_begin(make_console_window)
-	auto console_window = std::make_shared<Window>(
-		Console::kColumns * 8, Console::kRows * 16, frame_buffer_config.pixel_format);
-	console->SetWindow(console_window);
-	// #@@range_end(make_console_window)
-  
-	// #@@range_begin(create_screen)
-	FrameBuffer screen;
-	if (auto err = screen.Initialize(frame_buffer_config)) {
-		Log(kError, "failed to initialize frame buffer: %s at %s:%d\n",
-				err.Name(), err.File(), err.Line());
-	}	
-	layer_manager = new LayerManager;
-	layer_manager->SetWriter(&screen);
-	// #@@range_end(create_screen)
-	auto bglayer_id = layer_manager->NewLayer()
-		.SetWindow(bgwindow)
-		.Move({0, 0})
-		.ID();
-	mouse_layer_id = layer_manager->NewLayer()
-		.SetWindow(mouse_window)
-		.Move(mouse_position)
-		.ID();
-	// #@@range_begin(main_window_draggable)
-	auto main_window_layer_id = layer_manager->NewLayer()
-		.SetWindow(main_window)
-		.SetDraggable(true)
-		.Move({300, 100})
-		.ID();
-	// #@@range_end(main_window_draggable)
-
-	// #@@range_begin(make_console_layer)
-	console->SetLayerID(layer_manager->NewLayer()
-		.SetWindow(console_window)
-		.Move({0, 0})
-		.ID());
-	// #@@range_end(make_console_layer)
-
-	// #@@range_begin(draw_all_layer)
-	layer_manager->UpDown(bglayer_id, 0);
-	layer_manager->UpDown(console->LayerID(), 1);
-	layer_manager->UpDown(main_window_layer_id, 2);
-	layer_manager->UpDown(mouse_layer_id, 3);
-	// layer_manager -> pixel_writer -> frame_buffer로 쓰기
-	layer_manager->Draw({{0, 0}, screen_size}); // 1회차 렌더링: 화면 전체 -> 렌더링 범위 지정
-	// #@@range_end(draw_all_layer)
-	// #@@range_end(main_window)
+	InitializeLayer();
+	InitializeMainWindow();
+	InitializeMouse();
+	layer_manager->Draw({{0, 0}, ScreenSize()});
+// #@@range_end(main_function)	
 	
 	// #@@range_begin(make_counter)
 	char str[128];
@@ -445,26 +112,21 @@ extern "C" void KernelMainNewStack(
 		
 		// #@@range_begin(get_front_message)
 		__asm__("cli"); // CPU interrupt flag to 0 // 외부 interrupt 차단 (race condition 차단 효과 / 완벽 X)
-		if (main_queue.Count() == 0) {
+		if (main_queue->size() == 0) {
 			__asm__("sti");
 			continue;
 		}
 		// #@@range_end(draw_window_layer)
 		// #@@range_end(show_count)
 		
-		Message msg = main_queue.Front();
-		main_queue.Pop();
+		Message msg = main_queue->front();
+		main_queue->pop_front();
 		__asm__("sti"); // CPU interrupt flag to 1 // 외부 interrupt 승인
 		// #@@range_end(get_front_message)
 
 		switch (msg.type) {
 		case Message::kInterruptXHCI:
-			while (xhc.PrimaryEventRing()->HasFront()) {
-				if (auto err = ProcessEvent(xhc)) {
-					Log(kError, "Error while ProcessEvent: %s at %s:%d\n",
-							err.Name(), err.File(), err.Line());
-				}
-			}
+			usb::xhci::ProcessEvents();
 			break;
 		default:
 			Log(kError, "Unknown message type: %d\n", msg.type);

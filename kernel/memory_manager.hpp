@@ -2,7 +2,7 @@
 #include <array>
 #include <limits>
 #include "error.hpp"
-
+#include "memory_map.hpp"
 // #@@range_begin(frame_id)
 // C++ 11에서 도입된 사용자 정의 리터럴:
 // operator"" suffix (타입 연산자) 정의 오버로드
@@ -66,4 +66,4 @@ class BitmapMemoryManager {
 };
 // #@@range_end(bitmap_memory_manager)
 
-Error InitializeHeap(BitmapMemoryManager& memory_manager);
+void InitializeMemoryManager(const MemoryMap& memory_map);

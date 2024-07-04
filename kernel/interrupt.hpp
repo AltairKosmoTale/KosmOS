@@ -59,6 +59,7 @@ class InterruptVector {
  public:
 	enum Number {
 		kXHCI = 0x40,
+		kLAPICTimer = 0x41,
 	};
 };
 // #@@range_end(vector_numbers)

@@ -421,10 +421,21 @@ EFI_STATUS EFIAPI UefiMain(
 			Print(L"Unimplemented pixel format: %d\n", gop->Mode->Info->PixelFormat);
 			Halt();
 	}
-	
-	typedef void __attribute__((sysv_abi)) EntryPointType(const struct FrameBufferConfig*, const struct MemoryMap*);
+
+	// #@@range_begin(get_acpitable)
+	// RSDP 구조체에 대한 포인터 취득
+	VOID* acpi_table = NULL;
+	for (UINTN i = 0; i < system_table->NumberOfTableEntries; ++i) {
+		if (CompareGuid(&gEfiAcpiTableGuid, &system_table->ConfigurationTable[i].VendorGuid)) {
+			acpi_table = system_table->ConfigurationTable[i].VendorTable;
+			break;
+		}
+	}
+  
+	typedef void __attribute__((sysv_abi)) EntryPointType(const struct FrameBufferConfig*, const struct MemoryMap*, const VOID*);
 	EntryPointType* entry_point = (EntryPointType*)entry_addr;
-	entry_point(&config, &memmap);
+	entry_point(&config, &memmap, acpi_table);
+	// #@@range_end(get_acpitable)
 	// #@@range_end(pass_frame_buffer_config)
 	// #@@range_end(call_kernel)
 	

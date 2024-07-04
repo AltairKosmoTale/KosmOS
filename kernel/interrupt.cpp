@@ -1,6 +1,7 @@
 #include "interrupt.hpp"
 #include "asmfunc.h"
 #include "segment.hpp"
+#include "timer.hpp"
 
 // #@@range_begin(idt_array)
 std::array<InterruptDescriptor, 256> idt;
@@ -26,6 +27,7 @@ void NotifyEndOfInterrupt() { // interrupt의 종료를 CPU에 알림
 }
 // #@@range_end(notify_eoi)
 
+// #@@range_begin(int_handler)
 namespace {
 	std::deque<Message>* msg_queue;
 
@@ -34,8 +36,18 @@ namespace {
 		msg_queue->push_back(Message{Message::kInterruptXHCI});
 		NotifyEndOfInterrupt();
 	}
+	
+	// #@@range_begin(int_handler)
+	__attribute__((interrupt))
+	void IntHandlerLAPICTimer(InterruptFrame* frame) {
+		LAPICTimerOnInterrupt();
+		NotifyEndOfInterrupt();	// 처리안해 주면 두 번째 이후 인터럽트 도착 X
+	}
+	// #@@range_end(int_handler)
 }
+// #@@range_end(int_handler)
 
+// #@@range_begin(register_handler)
 void InitializeInterrupt(std::deque<Message>* msg_queue) {
 	::msg_queue = msg_queue;
 
@@ -44,5 +56,10 @@ void InitializeInterrupt(std::deque<Message>* msg_queue) {
 		MakeIDTAttr(DescriptorType::kInterruptGate, 0),
 		reinterpret_cast<uint64_t>(IntHandlerXHCI),
 		kKernelCS); // 현재 code segment 값 지정
+	SetIDTEntry(idt[InterruptVector::kLAPICTimer],
+		MakeIDTAttr(DescriptorType::kInterruptGate, 0),
+		reinterpret_cast<uint64_t>(IntHandlerLAPICTimer),
+		kKernelCS);		
 	LoadIDT(sizeof(idt) - 1, reinterpret_cast<uintptr_t>(&idt[0]));
 }
+// #@@range_end(register_handler)
